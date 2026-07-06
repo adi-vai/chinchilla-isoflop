@@ -18,7 +18,7 @@ def generate_input(N: int):
     return torch.linspace(-2 * np.pi, 2 * np.pi, N).reshape(-1, 1)
 
 
-def generate_target(x):  # TODO: Fill in type
+def generate_target(x):
     return torch.sin(x).reshape(-1, 1)
 
 
@@ -26,7 +26,6 @@ def generate_target(x):  # TODO: Fill in type
 class Model(nn.Module):
     def __init__(self) -> None:
         super().__init__()
-        # Where does the 512 come from? Appropriate?
         self.two_layer_mlp = nn.Sequential(
             nn.Linear(1, 512),
             nn.Tanh(),
