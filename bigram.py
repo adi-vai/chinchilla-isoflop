@@ -107,15 +107,14 @@ def main():
     x, y = get_batch(data)
     model = BigramLanguageModel(len(vocab))
     decoder_fn = decoder(int_to_string_mapping(vocab))
-    logits, loss = model(x, y)
-    logging.info(f"Logits: {logits.shape}")
-    logging.info(f"Baseline loss {loss}")
     logging.info(
-        decoder_fn(
-            model.generate(torch.zeros((1, 1), dtype=torch.long), max_new_tokens=100)[
-                0
-            ].tolist()
-        )
+        f"Before training {
+            decoder_fn(
+                model.generate(
+                    torch.zeros((1, 1), dtype=torch.long), max_new_tokens=100
+                )[0].tolist()
+            )
+        }"
     )
     train_steps = 10_000
     opt = optim.AdamW(model.parameters(), lr=1e-3)
@@ -126,6 +125,15 @@ def main():
         opt.step()
         if i % 1_000 == 0:
             logging.info(f"Current loss is {loss}")
+    logging.info(
+        f"After training {
+            decoder_fn(
+                model.generate(
+                    torch.zeros((1, 1), dtype=torch.long), max_new_tokens=100
+                )[0].tolist()
+            )
+        }"
+    )
     return
 
 
