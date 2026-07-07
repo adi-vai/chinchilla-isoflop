@@ -1,17 +1,17 @@
 import logging
 
-logging.basicConfig(level=logging.INFO)
-
 import numpy as np
 import torch
 from torch import nn, optim
+
+logging.basicConfig(level=logging.INFO)
 
 device = (
     torch.accelerator.current_accelerator().type
     if torch.accelerator.is_available()
     else "cpu"
 )
-print(f"Using {device} device")
+logging.info(f"Using {device} device")
 
 
 def generate_input(N: int):
