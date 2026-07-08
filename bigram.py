@@ -55,7 +55,7 @@ def get_batch(data):
     ix = torch.randint(len(data) - CONTEXT_LENGTH, (BATCH_SIZE,))
     x = torch.stack([data[i : i + CONTEXT_LENGTH] for i in ix])
     y = torch.stack([data[i + 1 : i + CONTEXT_LENGTH + 1] for i in ix])
-    return x, y
+    return x.to(device), y.to(device)
 
 
 def get_raw_data():
@@ -105,13 +105,13 @@ def main():
     logging.info(f"Vocab of size {len(vocab)}")
     logging.info(f"Loaded data {data.shape} {data[:100]}")
     x, y = get_batch(data)
-    model = BigramLanguageModel(len(vocab))
+    model = BigramLanguageModel(len(vocab)).to(device)
     decoder_fn = decoder(int_to_string_mapping(vocab))
     logging.info(
         f"Before training {
             decoder_fn(
                 model.generate(
-                    torch.zeros((1, 1), dtype=torch.long), max_new_tokens=100
+                    torch.zeros((1, 1), dtype=torch.long).to(device), max_new_tokens=100
                 )[0].tolist()
             )
         }"
@@ -129,7 +129,7 @@ def main():
         f"After training {
             decoder_fn(
                 model.generate(
-                    torch.zeros((1, 1), dtype=torch.long), max_new_tokens=100
+                    torch.zeros((1, 1), dtype=torch.long).to(device), max_new_tokens=100
                 )[0].tolist()
             )
         }"
