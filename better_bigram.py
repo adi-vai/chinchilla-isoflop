@@ -27,13 +27,16 @@ logging.info(f"Using {device} device")
 
 
 class BigramLanguageModel(nn.Module):
-    def __init__(self, vocab_size):
+    def __init__(self, vocab_size, n_embed):
         super().__init__()
-        self.token_embedding_table = nn.Embedding(vocab_size, vocab_size)
+        self.token_embedding_table = nn.Embedding(vocab_size, n_embed)
+        self.position_embedding_table = nn.Embedding(CONTEXT_LENGTH, n_embed)
+        self.lm_head = nn.Linear(n_embed, vocab_size)
 
     def forward(self, inputs, targets=None):
 
-        logits = self.token_embedding_table(inputs)
+        token_embed = self.token_embedding_table(inputs)
+        logits = self.lm_head(token_embed)
 
         if targets is None:
             loss = None
@@ -122,7 +125,7 @@ def main():
     logging.info(f"Loaded {len(data)} characters")
     logging.info(f"Vocab of size {len(vocab)}")
     logging.info(f"Loaded data {data.shape} {data[:100]}")
-    model = BigramLanguageModel(len(vocab)).to(device)
+    model = BigramLanguageModel(len(vocab), 32).to(device)
     decoder_fn = decoder(int_to_string_mapping(vocab))
     logging.info(
         f"Before training {
