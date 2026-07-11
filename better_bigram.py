@@ -1,6 +1,7 @@
 import logging
 import os
 import urllib.request
+from dataclasses import dataclass, field
 
 import torch
 import torch.nn as nn
@@ -10,13 +11,25 @@ from torch.nn import functional as F
 DATA_PATH = "data/input.txt"
 URL = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
 
-CONTEXT_LENGTH = 8
-BATCH_SIZE = 32
-MAX_ITERATIONS = 10_000
-EVAL_ITERATIONS = 200  # kept small, 200 is enough for mean loss estimation
-EVAL_INTERVAL = MAX_ITERATIONS // 10
-EMBEDDING_DIM = 32
-NEGATIVE_INF = float("-inf")
+
+@dataclass
+class ModelConfig:
+    vocab_size: int  # data-dependent: only known once the corpus is loaded
+    context_length: int = 8
+    embedding_dim: int = 32
+
+
+@dataclass
+class TrainConfig:
+    batch_size: int = 32
+    max_iterations: int = 10_000
+    eval_iterations: int = 200  # kept small, 200 is enough for mean loss estimation
+    learning_rate: float = 1e-3
+    eval_interval: int = field(init=False)
+
+    def __post_init__(self):
+        self.eval_interval = self.max_iterations // 10
+
 
 logging.basicConfig(level=logging.INFO)
 torch.manual_seed(1_337)
@@ -30,12 +43,14 @@ logging.info(f"Using {device} device")
 
 
 class BigramLanguageModel(nn.Module):
-    def __init__(self, vocab_size, n_embed):
+    def __init__(self, config: ModelConfig):
         super().__init__()
-        self.token_embedding_table = nn.Embedding(vocab_size, n_embed)
-        self.position_embedding_table = nn.Embedding(CONTEXT_LENGTH, n_embed)
-        self.sa_head = SelfAttentionHead(CONTEXT_LENGTH, n_embed, n_embed)
-        self.lm_head = nn.Linear(n_embed, vocab_size)
+        self.context_length = config.context_length
+        n_embed = config.embedding_dim
+        self.token_embedding_table = nn.Embedding(config.vocab_size, n_embed)
+        self.position_embedding_table = nn.Embedding(config.context_length, n_embed)
+        self.sa_head = SelfAttentionHead(config.context_length, n_embed, n_embed)
+        self.lm_head = nn.Linear(n_embed, config.vocab_size)
 
     def forward(self, inputs, targets=None):
         B, T = inputs.shape
@@ -58,7 +73,7 @@ class BigramLanguageModel(nn.Module):
 
     def generate(self, inputs, max_new_tokens):
         for _ in range(max_new_tokens):
-            cropped_inputs = inputs[:, -CONTEXT_LENGTH:]
+            cropped_inputs = inputs[:, -self.context_length :]
             logits, _ = self(cropped_inputs)
             logits = logits[:, -1, :]
             probs = F.softmax(logits, dim=1)
@@ -84,17 +99,17 @@ class SelfAttentionHead(nn.Module):
         q = self.query(inputs)
 
         weights = q @ k.transpose(-2, -1) * C**-0.5  # unit variance normalization
-        weights = weights.masked_fill(self.tril[:T, :T] == 0, NEGATIVE_INF)
+        weights = weights.masked_fill(self.tril[:T, :T] == 0, float("-inf"))
         weights = F.softmax(weights, dim=-1)
         v = self.value(inputs)
         out = weights @ v
         return out
 
 
-def get_batch(data):
-    ix = torch.randint(len(data) - CONTEXT_LENGTH, (BATCH_SIZE,))
-    x = torch.stack([data[i : i + CONTEXT_LENGTH] for i in ix])
-    y = torch.stack([data[i + 1 : i + CONTEXT_LENGTH + 1] for i in ix])
+def get_batch(data, context_length, batch_size):
+    ix = torch.randint(len(data) - context_length, (batch_size,))
+    x = torch.stack([data[i : i + context_length] for i in ix])
+    y = torch.stack([data[i + 1 : i + context_length + 1] for i in ix])
     return x.to(device), y.to(device)
 
 
@@ -107,14 +122,14 @@ def get_raw_data():
 
 
 @torch.no_grad()
-def estimate_loss(model, train_data, val_data):
+def estimate_loss(model, train_data, val_data, train_config: TrainConfig, model_config: ModelConfig):
     runs = [("train", train_data), ("val", val_data)]
     out = {}
     model.eval()
     for split, d in runs:
-        losses = torch.zeros(EVAL_ITERATIONS)
-        for k in range(EVAL_ITERATIONS):
-            x, y = get_batch(d)
+        losses = torch.zeros(train_config.eval_iterations)
+        for k in range(train_config.eval_iterations):
+            x, y = get_batch(d, model_config.context_length, train_config.batch_size)
             _, loss = model(x, y)
             losses[k] = loss.item()
         out[split] = losses.mean()
@@ -160,8 +175,9 @@ def main():
     logging.info(f"Loaded {len(data)} characters")
     logging.info(f"Vocab of size {len(vocab)}")
     logging.info(f"Loaded data {data.shape} {data[:100]}")
-    vocab_size = len(vocab)
-    model = BigramLanguageModel(vocab_size, EMBEDDING_DIM).to(device)
+    model_config = ModelConfig(vocab_size=len(vocab))
+    train_config = TrainConfig()
+    model = BigramLanguageModel(model_config).to(device)
     decoder_fn = decoder(int_to_string_mapping(vocab))
     logging.info(
         f"Before training {
@@ -172,17 +188,17 @@ def main():
             )
         }"
     )
-    opt = optim.AdamW(model.parameters(), lr=1e-3)
+    opt = optim.AdamW(model.parameters(), lr=train_config.learning_rate)
     # Training loop
     train_data, val_data = train_test_split(data, train_ratio=0.9)
-    for i in range(MAX_ITERATIONS):
-        if i % EVAL_INTERVAL == 0:
-            losses = estimate_loss(model, train_data, val_data)
+    for i in range(train_config.max_iterations):
+        if i % train_config.eval_interval == 0:
+            losses = estimate_loss(model, train_data, val_data, train_config, model_config)
             logging.info(
                 f"step {i}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}"
             )
 
-        x, y = get_batch(train_data)
+        x, y = get_batch(train_data, model_config.context_length, train_config.batch_size)
         logits, loss = model(x, y)
         opt.zero_grad(set_to_none=True)
         loss.backward()
