@@ -13,7 +13,10 @@ URL = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshake
 CONTEXT_LENGTH = 8
 BATCH_SIZE = 32
 MAX_ITERATIONS = 10_000
-EVAL_ITERATIONS = 1_000
+EVAL_ITERATIONS = 200  # kept small, 200 is enough for mean loss estimation
+EVAL_INTERVAL = MAX_ITERATIONS // 10
+EMBEDDING_DIM = 32
+NEGATIVE_INF = float("-inf")
 
 logging.basicConfig(level=logging.INFO)
 torch.manual_seed(1_337)
@@ -31,12 +34,19 @@ class BigramLanguageModel(nn.Module):
         super().__init__()
         self.token_embedding_table = nn.Embedding(vocab_size, n_embed)
         self.position_embedding_table = nn.Embedding(CONTEXT_LENGTH, n_embed)
+        self.sa_head = SelfAttentionHead(CONTEXT_LENGTH, n_embed, n_embed)
         self.lm_head = nn.Linear(n_embed, vocab_size)
 
     def forward(self, inputs, targets=None):
+        B, T = inputs.shape
 
-        token_embed = self.token_embedding_table(inputs)
-        logits = self.lm_head(token_embed)
+        token_embedding = self.token_embedding_table(inputs)
+        position_embedding = self.position_embedding_table(
+            torch.arange(T, device=device)
+        )
+        x = token_embedding + position_embedding
+        x = self.sa_head(x)
+        logits = self.lm_head(x)
 
         if targets is None:
             loss = None
@@ -48,12 +58,37 @@ class BigramLanguageModel(nn.Module):
 
     def generate(self, inputs, max_new_tokens):
         for _ in range(max_new_tokens):
-            logits, _ = self(inputs)
+            cropped_inputs = inputs[:, -CONTEXT_LENGTH:]
+            logits, _ = self(cropped_inputs)
             logits = logits[:, -1, :]
             probs = F.softmax(logits, dim=1)
             next_input = torch.multinomial(probs, num_samples=1)
             inputs = torch.cat((inputs, next_input), dim=1)
         return inputs
+
+
+class SelfAttentionHead(nn.Module):
+    def __init__(self, context_length, embedding_dim, head_size):
+        super().__init__()
+        self.query = nn.Linear(embedding_dim, head_size, bias=False)
+        self.key = nn.Linear(embedding_dim, head_size, bias=False)
+        self.value = nn.Linear(embedding_dim, head_size, bias=False)
+        self.register_buffer(
+            "tril", torch.tril(torch.ones(context_length, context_length))
+        )
+
+    def forward(self, inputs):
+        B, T, C = inputs.shape
+
+        k = self.key(inputs)
+        q = self.query(inputs)
+
+        weights = q @ k.transpose(-2, -1) * C**-0.5  # unit variance normalization
+        weights = weights.masked_fill(self.tril[:T, :T] == 0, NEGATIVE_INF)
+        weights = F.softmax(weights, dim=-1)
+        v = self.value(inputs)
+        out = weights @ v
+        return out
 
 
 def get_batch(data):
@@ -125,7 +160,8 @@ def main():
     logging.info(f"Loaded {len(data)} characters")
     logging.info(f"Vocab of size {len(vocab)}")
     logging.info(f"Loaded data {data.shape} {data[:100]}")
-    model = BigramLanguageModel(len(vocab), 32).to(device)
+    vocab_size = len(vocab)
+    model = BigramLanguageModel(vocab_size, EMBEDDING_DIM).to(device)
     decoder_fn = decoder(int_to_string_mapping(vocab))
     logging.info(
         f"Before training {
@@ -140,7 +176,7 @@ def main():
     # Training loop
     train_data, val_data = train_test_split(data, train_ratio=0.9)
     for i in range(MAX_ITERATIONS):
-        if i % EVAL_ITERATIONS == 0:
+        if i % EVAL_INTERVAL == 0:
             losses = estimate_loss(model, train_data, val_data)
             logging.info(
                 f"step {i}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}"
