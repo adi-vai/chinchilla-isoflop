@@ -17,6 +17,9 @@ class ModelConfig:
     vocab_size: int  # data-dependent: only known once the corpus is loaded
     context_length: int = 256
     embedding_dimension: int = 384  # 6 heads of head_size 64 each
+    number_of_heads: int = 6
+    number_of_layers: int = 6
+    dropout_rate: float = 0.2
 
 
 @dataclass
@@ -53,28 +56,18 @@ class BigramLanguageModel(nn.Module):
         self.position_embedding_table = nn.Embedding(
             config.context_length, embedding_dimension
         )
-        number_of_heads = 6  # TODO: Extract into ModelConfig
-        number_of_layers = 6
-        dropout_rate = 0.2
         self.blocks = nn.Sequential(
             *[
                 TransformerBlock(
                     self.context_length,
                     embedding_dimension,
-                    number_of_heads,
-                    dropout_rate,
+                    config.number_of_heads,
+                    config.dropout_rate,
                 )
-                for _ in range(number_of_layers)
+                for _ in range(config.number_of_layers)
             ]
         )
         self.final_layer_norm = nn.LayerNorm(embedding_dimension)
-        # self.sa_heads = MultiHeadedSelfAttention(
-        #     config.context_length,
-        #     embedding_dimension,
-        #     4,  # 4 heads
-        #     embedding_dimension // 4,  # head size
-        # )
-        self.ffwd = FeedForward(embedding_dimension, dropout_rate)
         self.lm_head = nn.Linear(embedding_dimension, config.vocab_size)
 
     def forward(self, inputs, targets=None):
@@ -87,7 +80,6 @@ class BigramLanguageModel(nn.Module):
         x = token_embedding + position_embedding
         x = self.blocks(x)
         x = self.final_layer_norm(x)
-        x = self.ffwd(x)  # (B, T, C)
         logits = self.lm_head(x)
 
         if targets is None:
@@ -184,7 +176,7 @@ class SelfAttentionHead(nn.Module):
         self.register_buffer(
             "tril", torch.tril(torch.ones(context_length, context_length))
         )
-        self.droput = nn.Dropout(dropout_rate)
+        self.dropout = nn.Dropout(dropout_rate)
 
     def forward(self, inputs):
         B, T, C = inputs.shape
@@ -195,7 +187,7 @@ class SelfAttentionHead(nn.Module):
         weights = q @ k.transpose(-2, -1) * C**-0.5  # unit variance normalization
         weights = weights.masked_fill(self.tril[:T, :T] == 0, float("-inf"))
         weights = F.softmax(weights, dim=-1)
-        weights = self.droput(weights)
+        weights = self.dropout(weights)
         v = self.value(inputs)
         out = weights @ v
         return out
