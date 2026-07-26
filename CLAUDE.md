@@ -32,12 +32,15 @@ deep learning through this build — see "How to work with me" below.
   deliberately NOT a variable — keep it fixed to isolate the N/D tradeoff.
 - Log per run: N, D, C=6ND, final/val loss → CSV in results/. Keep raw logs committed.
 - Repo layout (create as needed, not up front): src/ (model, train), configs/,
-  results/, notebooks/ or plots/, README.md.
+  results/, notebooks/ or plots/, README.md, NOTES.md (decisions + open questions).
+  learning/ holds frozen practice snapshots — src/ never imports from it.
+- src/ is a package: run as `uv run python -m src.<module>` from the repo root, and
+  resolve paths from `__file__`, not the CWD.
 
 ## Build phases (current focus at top)
-1. PyTorch fluency: hand-written training loop on a tiny MLP. (CURRENT)
-2. Transformer from scratch (follow nanoGPT), understand attention/residual/layernorm.
-3. GPU harness + config-driven runs + CSV logging.
+1. PyTorch fluency: hand-written training loop on a tiny MLP. (DONE)
+2. Transformer from scratch (follow nanoGPT), understand attention/residual/layernorm. (DONE)
+3. GPU harness + config-driven runs + CSV logging. (CURRENT)
 4. IsoFLOP core sweep (Approach 2) — the must-land deliverable.
 5. Over-training / inference-cost extension.
 6. Writeup (protected — cut experiments before cutting writeup polish).
