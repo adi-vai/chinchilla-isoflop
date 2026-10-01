@@ -10,3 +10,12 @@ dependencies = [
     "requests>=2.34.2",
     "torch>=2.12.1",
 ]
+[tool.basedpyright]
+typeCheckingMode = "recommended"
+reportAny = false
+reportUnknownMemberType = false
+reportUnknownVariableType = false
+reportUnknownArgumentType = false
+reportUnknownParameterType = false
+reportUnknownLambdaType = false
+reportConstantRedefinition = false
