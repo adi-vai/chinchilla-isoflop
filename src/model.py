@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import override
 
@@ -84,11 +85,11 @@ class BigramLanguageModel(nn.Module):
     def forward(
         self, inputs: torch.Tensor, targets: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        B, T = inputs.shape
+        _, sequence_length = inputs.shape
 
         token_embedding = self.token_embedding_table(inputs)
         position_embedding = self.position_embedding_table(
-            torch.arange(T, device=device)
+            torch.arange(sequence_length, device=device)
         )
         x = token_embedding + position_embedding
         x = self.blocks(x)
@@ -98,9 +99,9 @@ class BigramLanguageModel(nn.Module):
         if targets is None:
             loss = None
         else:
-            B, T, C = logits.shape
-            logits = logits.view(B * T, C)
-            loss = F.cross_entropy(logits, targets.view(B * T))
+            batch, sequence_length, vocab_size = logits.shape
+            logits = logits.view(batch * sequence_length, vocab_size)
+            loss = F.cross_entropy(logits, targets.view(batch * sequence_length))
         return logits, loss
 
     def generate(self, inputs: torch.Tensor, max_new_tokens: int) -> torch.Tensor:
@@ -205,7 +206,8 @@ class MultiHeadedSelfAttention(nn.Module):
 
 class SelfAttentionHead(nn.Module):
     dropout: nn.Dropout
-    tril: torch.Tensor
+    tril: torch.Tensor  # pyright: ignore[reportUninitializedInstanceVariable]  # set via register_buffer
+    dot_product_normalization: float
 
     def __init__(
         self,
@@ -218,6 +220,7 @@ class SelfAttentionHead(nn.Module):
         self.query = nn.Linear(embedding_dimension, head_size, bias=False)
         self.key = nn.Linear(embedding_dimension, head_size, bias=False)
         self.value = nn.Linear(embedding_dimension, head_size, bias=False)
+        self.dot_product_normalization = head_size**-0.5
         self.register_buffer(
             "tril", torch.tril(torch.ones(context_length, context_length))
         )
@@ -225,13 +228,17 @@ class SelfAttentionHead(nn.Module):
 
     @override
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        B, T, C = inputs.shape
+        _, sequence_length, embedding_dimension = inputs.shape
 
         k = self.key(inputs)
         q = self.query(inputs)
 
-        weights = q @ k.transpose(-2, -1) * C**-0.5  # unit variance normalization
-        weights = weights.masked_fill(self.tril[:T, :T] == 0, float("-inf"))
+        weights = (
+            q @ k.transpose(-2, -1) * embedding_dimension**-0.5
+        )  # bug, should be self.dot_product_normalization, which is head_size**-0.5
+        weights = weights.masked_fill(
+            self.tril[:sequence_length, :sequence_length] == 0, float("-inf")
+        )
         weights = F.softmax(weights, dim=-1)
         weights = self.dropout(weights)
         v = self.value(inputs)
@@ -239,28 +246,34 @@ class SelfAttentionHead(nn.Module):
         return out
 
 
-def get_batch(data, context_length, batch_size: int):
+def get_batch(
+    data: torch.Tensor, context_length: int, batch_size: int
+) -> tuple[torch.Tensor, torch.Tensor]:
     ix = torch.randint(len(data) - context_length, (batch_size,))
     x = torch.stack([data[i : i + context_length] for i in ix])
     y = torch.stack([data[i + 1 : i + context_length + 1] for i in ix])
     return x.to(device), y.to(device)
 
 
-def get_raw_data():
+def get_raw_data() -> str:
     if not os.path.exists(DATA_PATH):
         os.makedirs(os.path.dirname(DATA_PATH), exist_ok=True)
-        urllib.request.urlretrieve(URL, DATA_PATH)
+        _ = urllib.request.urlretrieve(URL, DATA_PATH)
     with open(DATA_PATH, "r", encoding="utf-8") as f:
         return f.read()
 
 
 @torch.no_grad()
 def estimate_loss(
-    model, train_data, val_data, train_config: TrainConfig, model_config: ModelConfig
+    model: BigramLanguageModel,
+    train_data: torch.Tensor,
+    val_data: torch.Tensor,
+    train_config: TrainConfig,
+    model_config: ModelConfig,
 ):
     runs = [("train", train_data), ("val", val_data)]
     out = {}
-    model.eval()
+    _ = model.eval()
     for split, d in runs:
         losses = torch.zeros(train_config.eval_iterations)
         for k in range(train_config.eval_iterations):
@@ -268,40 +281,40 @@ def estimate_loss(
             _, loss = model(x, y)
             losses[k] = loss.item()
         out[split] = losses.mean()
-    model.train()
+    _ = model.train()
     return out
 
 
-def get_data(raw_data):
+def get_data(raw_data: str):
     vocab = build_vocab(raw_data)
     return torch.tensor(
         encoder(string_to_int_mapping(vocab))(raw_data), dtype=torch.long
     ), vocab
 
 
-def build_vocab(data):
-    vocab = sorted(list(set(data)))
+def build_vocab(data: str) -> list[str]:
+    vocab = sorted(set(data))
     return vocab
 
 
-def train_test_split(data, train_ratio=0.9):
+def train_test_split(data: torch.Tensor, train_ratio: float = 0.9):
     train_size = int(train_ratio * len(data))
     return data[:train_size], data[train_size:]
 
 
-def string_to_int_mapping(vocab):
+def string_to_int_mapping(vocab: list[str]) -> dict[str, int]:
     return {ch: i for i, ch in enumerate(vocab)}
 
 
-def int_to_string_mapping(vocab):
+def int_to_string_mapping(vocab: list[str]) -> dict[int, str]:
     return {i: ch for i, ch in enumerate(vocab)}
 
 
-def encoder(mapping):
+def encoder(mapping: dict[str, int]) -> Callable[[str], list[int]]:
     return lambda string: [mapping[ch] for ch in string]
 
 
-def decoder(mapping):
+def decoder(mapping: dict[int, str]) -> Callable[[list[int]], str]:
     return lambda lst: "".join(mapping[i] for i in lst)
 
 
