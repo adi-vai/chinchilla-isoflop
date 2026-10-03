@@ -15,7 +15,10 @@ deep learning through this build — see "How to work with me" below.
 
 ## Core facts to respect
 - Training compute: C ≈ 6ND (N params, D tokens). 6 = fwd(2) + bwd(4) per param per token.
-- IsoFLOP (Approach 2): fix C, sweep N, D = C/(6N); loss-vs-N is U-shaped; min = optimal N.
+- The harness counts compute EXACTLY: flops_per_token = 6N + 12·L·H·Q·T. The second term
+  is attention (no params, invisible to 6N); it is ~T/(6d) of compute — large for the
+  small models here, and varying with N, so 6ND would bias the sweep. See NOTES.md.
+- IsoFLOP (Approach 2): fix C, sweep N, D = C / flops_per_token; loss-vs-N is U-shaped; min = optimal N.
 - Cosine LR MUST decay to its minimum at each run's OWN token count. Every IsoFLOP
   run has a different D → each needs its own schedule length. Do NOT share one schedule.
 - Approach 3 (parametric fit L = E + A/N^α + B/D^β) is FRAGILE and is a STRETCH GOAL
@@ -30,7 +33,7 @@ deep learning through this build — see "How to work with me" below.
   sweep phase.
 - Dataset: fixed clean corpus (TinyStories or an OpenWebText subset). Data curation is
   deliberately NOT a variable — keep it fixed to isolate the N/D tradeoff.
-- Log per run: N, D, C=6ND, final/val loss → CSV in results/. Keep raw logs committed.
+- Log per run: N, D, realised C (exact FLOPs, after rounding iterations), final/val loss → CSV in results/. Keep raw logs committed.
 - Repo layout (create as needed, not up front): src/ (model, train), configs/,
   results/, notebooks/ or plots/, README.md, NOTES.md (decisions + open questions).
   learning/ holds frozen practice snapshots — src/ never imports from it.
