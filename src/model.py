@@ -205,9 +205,10 @@ class MultiHeadedSelfAttention(nn.Module):
 
 
 class SelfAttentionHead(nn.Module):
+    head_size: int
     dropout: nn.Dropout
+    qkv: nn.Linear
     tril: torch.Tensor  # pyright: ignore[reportUninitializedInstanceVariable]  # set via register_buffer
-    dot_product_normalization: float
 
     def __init__(
         self,
@@ -217,10 +218,10 @@ class SelfAttentionHead(nn.Module):
         dropout_rate: float,
     ):
         super().__init__()
-        self.query = nn.Linear(embedding_dimension, head_size, bias=False)
-        self.key = nn.Linear(embedding_dimension, head_size, bias=False)
-        self.value = nn.Linear(embedding_dimension, head_size, bias=False)
-        self.dot_product_normalization = head_size**-0.5
+        self.head_size = head_size
+        self.qkv = nn.Linear(
+            embedding_dimension, 3 * head_size, bias=False
+        )  # Query, Key, Value matrices combined into one
         self.register_buffer(
             "tril", torch.tril(torch.ones(context_length, context_length))
         )
@@ -230,18 +231,16 @@ class SelfAttentionHead(nn.Module):
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         _, sequence_length, embedding_dimension = inputs.shape
 
-        k = self.key(inputs)
-        q = self.query(inputs)
+        q, k, v = torch.split(self.qkv(inputs), self.head_size, dim=-1)
 
         weights = (
             q @ k.transpose(-2, -1) * embedding_dimension**-0.5
-        )  # bug, should be self.dot_product_normalization, which is head_size**-0.5
+        )  # bug, should be head_size**-0.5
         weights = weights.masked_fill(
             self.tril[:sequence_length, :sequence_length] == 0, float("-inf")
         )
         weights = F.softmax(weights, dim=-1)
         weights = self.dropout(weights)
-        v = self.value(inputs)
         out = weights @ v
         return out
 
