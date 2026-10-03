@@ -129,12 +129,10 @@ class TransformerBlock(nn.Module):
         dropout_rate: float,
     ):
         super().__init__()
-        head_size = embedding_dimension // number_of_heads
         self.mh_sa = MultiHeadedSelfAttention(
             context_length,
             embedding_dimension,
             number_of_heads,
-            head_size,
             dropout_rate,
         )
         self.ffwd = FeedForward(embedding_dimension, dropout_rate)
@@ -171,7 +169,10 @@ class FeedForward(nn.Module):
 
 
 class MultiHeadedSelfAttention(nn.Module):
-    sa_heads: nn.ModuleList
+    num_heads: int
+    head_size: int
+    qkv: nn.Linear
+    tril: torch.Tensor  # pyright: ignore[reportUninitializedInstanceVariable]  # set via register_buffer
     dropout: nn.Dropout
     projection: nn.Linear
 
@@ -180,69 +181,91 @@ class MultiHeadedSelfAttention(nn.Module):
         context_length: int,
         embedding_dimension: int,
         num_heads: int,
-        head_size: int,
         dropout_rate: float,
     ):
         super().__init__()
-        self.sa_heads = nn.ModuleList(
-            [
-                SelfAttentionHead(
-                    context_length, embedding_dimension, head_size, dropout_rate
-                )
-                for _ in range(num_heads)
-            ]
+        assert embedding_dimension % num_heads == 0, (
+            f"number of heads {num_heads} does not divide embedding dimension {embedding_dimension}"
+        )
+        self.num_heads = num_heads
+        self.head_size = embedding_dimension // num_heads
+        self.qkv = nn.Linear(
+            embedding_dimension, 3 * embedding_dimension, bias=False
+        )  # Q, K, V matrices combined into one, and across num_heads of Attention
+        self.register_buffer(
+            "tril", torch.tril(torch.ones(context_length, context_length))
         )
         self.dropout = nn.Dropout(dropout_rate)
         self.projection = nn.Linear(embedding_dimension, embedding_dimension)
 
     @override
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        return self.dropout(
-            self.projection(
-                torch.cat([h(inputs) for h in self.sa_heads], dim=-1)  # Dim = C
-            )
+        batch_length, sequence_length, embedding_dimension = inputs.shape  # (B, T, d)
+
+        q, k, v = torch.split(
+            self.qkv(inputs), embedding_dimension, dim=-1
+        )  # 3 x (B, T, d)
+        q = q.view(
+            batch_length, sequence_length, self.num_heads, self.head_size
+        ).transpose(1, 2)  # (B, H, T, Q)
+        assert q.shape == (
+            batch_length,
+            self.num_heads,
+            sequence_length,
+            self.head_size,
+        ), (
+            f"Incorrect view for Q {q.shape}, expect {(batch_length, self.num_heads, sequence_length, self.head_size)}"
         )
-
-
-class SelfAttentionHead(nn.Module):
-    head_size: int
-    dropout: nn.Dropout
-    qkv: nn.Linear
-    tril: torch.Tensor  # pyright: ignore[reportUninitializedInstanceVariable]  # set via register_buffer
-
-    def __init__(
-        self,
-        context_length: int,
-        embedding_dimension: int,
-        head_size: int,
-        dropout_rate: float,
-    ):
-        super().__init__()
-        self.head_size = head_size
-        self.qkv = nn.Linear(
-            embedding_dimension, 3 * head_size, bias=False
-        )  # Query, Key, Value matrices combined into one
-        self.register_buffer(
-            "tril", torch.tril(torch.ones(context_length, context_length))
+        k_transpose = (
+            k.view(batch_length, sequence_length, self.num_heads, self.head_size)
+            .transpose(1, 2)
+            .transpose(-2, -1)
+        )  # (B, H, Q, T)
+        assert k_transpose.shape == (
+            batch_length,
+            self.num_heads,
+            self.head_size,
+            sequence_length,
+        ), (
+            f"Incorrect view for K^T {k_transpose.shape}, expect {(batch_length, self.num_heads, self.head_size, sequence_length)}"
         )
-        self.dropout = nn.Dropout(dropout_rate)
-
-    @override
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        _, sequence_length, embedding_dimension = inputs.shape
-
-        q, k, v = torch.split(self.qkv(inputs), self.head_size, dim=-1)
-
         weights = (
-            q @ k.transpose(-2, -1) * embedding_dimension**-0.5
-        )  # bug, should be head_size**-0.5
+            q @ k_transpose * embedding_dimension**-0.5
+        )  # bug, should be head_size**-0.5 # (B, H, T, T)
+        assert weights.shape == (
+            batch_length,
+            self.num_heads,
+            sequence_length,
+            sequence_length,
+        ), (
+            f"Incorrect shape for weights {weights.shape}, expected {(batch_length, self.num_heads, sequence_length, sequence_length)}"
+        )
         weights = weights.masked_fill(
             self.tril[:sequence_length, :sequence_length] == 0, float("-inf")
         )
         weights = F.softmax(weights, dim=-1)
-        weights = self.dropout(weights)
-        out = weights @ v
-        return out
+        weights = self.dropout(weights)  # attention dropout
+
+        v = v.view(
+            batch_length, sequence_length, self.num_heads, self.head_size
+        ).transpose(1, 2)  # (B, H, T, Q)
+        assert v.shape == (
+            batch_length,
+            self.num_heads,
+            sequence_length,
+            self.head_size,
+        ), (
+            f"Incorrect view for V {v.shape}, expect {(batch_length, self.num_heads, sequence_length, self.head_size)}"
+        )
+        out = (weights @ v).transpose(1, 2)
+        # (B, H, T, T) @ (B, H, T, Q) = (B, H, T, Q) -> (B, T, H, Q)
+        return self.dropout(  # residual dropout
+            self.projection(
+                out.contiguous().view(
+                    batch_length, sequence_length, embedding_dimension
+                )  # (B, T, d)
+            )
+        )
 
 
 def get_batch(
