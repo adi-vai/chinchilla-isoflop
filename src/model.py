@@ -229,9 +229,7 @@ class MultiHeadedSelfAttention(nn.Module):
         ), (
             f"Incorrect view for K^T {k_transpose.shape}, expect {(batch_length, self.num_heads, self.head_size, sequence_length)}"
         )
-        weights = (
-            q @ k_transpose * embedding_dimension**-0.5
-        )  # bug, should be head_size**-0.5 # (B, H, T, T)
+        weights = q @ k_transpose * self.head_size**-0.5  # (B, H, T, T)
         assert weights.shape == (
             batch_length,
             self.num_heads,
