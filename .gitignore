@@ -12,3 +12,6 @@ wheels/
 # Config files
 .claude/
 .zed/
+
+# Scratch files
+scratch/

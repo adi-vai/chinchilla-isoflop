@@ -2,7 +2,7 @@
 
 Durable project state: what's decided, what's open, what's next. Complements
 `CLAUDE.md` (which holds the invariants and the phase plan) — this file tracks
-the moving parts. Last updated 2026-10-04.
+the moving parts. Last updated 2026-10-05.
 
 ## Glossary
 
@@ -45,18 +45,17 @@ annotations and batched attention. History:
 - `0d5e5f7` — q/k/v fused into one projection within each head.
 - `5886224` — q/k/v fused across heads: one `Linear(d, 3d)` in
   `MultiHeadedSelfAttention`, reshaped to `(B, H, T, Q)`; `SelfAttentionHead`
-  removed. Smoke-tested only.
+  removed. **Verified equivalent** to `59be118` (see Equivalence test below).
+- `24afd11` — attention scaling fixed to `head_size**-0.5`.
 
 The model and training loop are still in one file; the split into
 `src/model.py` and `src/train.py` comes with the harness.
 
 **Next steps, in order:**
-1. Equivalence test: batched attention (`5886224`) vs per-head (`59be118`).
-2. Fix the attention scaling to `head_size**-0.5`, as its own commit.
-3. Renames: `BigramLanguageModel` → `TransformerLM`, `embedding_dimension` →
+1. Renames: `BigramLanguageModel` → `TransformerLM`, `embedding_dimension` →
    `model_width`, `number_of_layers` → `model_depth`. Device from
    `inputs.device`; paths from `__file__`.
-4. `num_params()`, with a pinned convention for embeddings and tied weights.
+2. `num_params()`, with a pinned convention for embeddings and tied weights.
 
 ## Order of work for the rest of phase 3
 
@@ -140,8 +139,8 @@ class-level declaration plus a targeted
 ## Known issues
 
 **Attention logits are scaled by `embedding_dimension**-0.5` instead of
-`head_size**-0.5`** — in `learning/better_bigram.py`, and deliberately still in
-`src/model.py` until the equivalence test passes.
+`head_size**-0.5`** — in `learning/better_bigram.py` (left there on purpose).
+Fixed in `src/model.py` in `24afd11`, after the equivalence test passed.
 
 Why it's wrong: the scaling fixes the variance of a dot product. A score is
 `Σ qᵢkᵢ` over `head_size` terms; with unit-variance components its variance is
@@ -153,11 +152,19 @@ too uniform. The error factor is exactly `√number_of_heads`, so it varies with
 swept hyperparameter and biases runs against each other. The model partly
 compensates by learning larger `W_q`, `W_k`, which is why it still trains.
 
-## Equivalence test (next)
+## Equivalence test (done)
 
-Throwaway script in the scratchpad, not committed (it needs the old code).
+**Result:** the batched attention in `5886224` matches the per-head version in
+`59be118` — max |difference| 1.3e-07 at `T=8` and 1.8e-07 at `T=5`
+(`T < context_length`, exercising the mask slice), well inside `atol=1e-6`.
+Deliberately broken copies fail: q/v blocks swapped (diff 1.3), q/k swapped
+(0.08), one head's rows misplaced (0.12). After the scaling fix (`24afd11`) the
+outputs differ by ~1e-01, as intended.
 
-1. `git show 59be118:src/model.py > <scratchpad>/model_per_head.py`.
+Throwaway script in `scratch/` (gitignored), not committed (it needs the old code).
+Steps, for reference:
+
+1. `git show 59be118:src/model.py > scratch/model_per_head.py`.
 2. Import both; seed *after* the imports (importing `src.model` reseeds the RNG).
 3. Build old and new `MultiHeadedSelfAttention` with distinct small sizes
    (e.g. `d=32, H=4, Q=8, T=8`); `.eval()` both so dropout is off.
