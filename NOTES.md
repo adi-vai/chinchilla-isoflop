@@ -53,7 +53,7 @@ The model and training loop are still in one file; the split into
 
 **Next steps, in order:**
 1. Paths from `__file__` (with the `train.py` split).
-2. `compute_parameters()` and `total_parameters()` on the model (convention below).
+2. ~~Parameter counts~~ — done: `get_total_params()`, `get_compute_params()`.
 
 ## Order of work for the rest of phase 3
 
@@ -126,8 +126,8 @@ Only nanoGPT's `model.py` informs the model code; `prepare.py` and `train.py`
 inform the harness.
 
 **Two parameter counts, both on the model and both logged per run.**
-- `total_parameters`: every parameter.
-- `compute_parameters`: total minus the token and position embedding tables.
+- `get_total_params()`: every parameter.
+- `get_compute_params()`: total minus the token and position embedding tables.
   This is the `N` in `6N`. Embedding lookups do no matmul work; `lm_head` does and
   is counted. (nanoGPT counts its token embedding because it is weight-tied to
   `lm_head`; this model doesn't tie weights, so both tables are excluded.)

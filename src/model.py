@@ -113,6 +113,17 @@ class TransformerLanguageModel(nn.Module):
             inputs = torch.cat((inputs, next_input), dim=1)
         return inputs
 
+    def get_total_params(self) -> int:
+        return sum(p.numel() for p in self.parameters())
+
+    def get_compute_params(self) -> int:
+        compute_params = self.get_total_params()
+        # No shared weights
+        compute_params -= self.token_embedding_table.weight.numel()
+        # Position embedding is fixed lookup and doesn't contribute to compute cost
+        compute_params -= self.position_embedding_table.weight.numel()
+        return compute_params
+
 
 class TransformerBlock(nn.Module):
     mh_sa: MultiHeadedSelfAttention
