@@ -19,9 +19,9 @@ URL = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshake
 class ModelConfig:
     vocab_size: int  # data-dependent: only known once the corpus is loaded
     context_length: int = 256
-    embedding_dimension: int = 384  # 6 heads of head_size 64 each
-    number_of_heads: int = 6
-    number_of_layers: int = 6
+    model_width: int = 384  # 6 heads of head_size 64 each
+    num_heads: int = 6
+    model_depth: int = 6
     dropout_rate: float = 0.2
 
 
@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 logger.info(f"Using {device} device")
 
 
-class BigramLanguageModel(nn.Module):
+class TransformerLanguageModel(nn.Module):
     context_length: int
     token_embedding_table: nn.Embedding
     position_embedding_table: nn.Embedding
@@ -60,26 +60,23 @@ class BigramLanguageModel(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.context_length = config.context_length
-        embedding_dimension = config.embedding_dimension
-        self.token_embedding_table = nn.Embedding(
-            config.vocab_size, embedding_dimension
-        )
+        self.token_embedding_table = nn.Embedding(config.vocab_size, config.model_width)
         self.position_embedding_table = nn.Embedding(
-            config.context_length, embedding_dimension
+            config.context_length, config.model_width
         )
         self.blocks = nn.Sequential(
             *[
                 TransformerBlock(
                     self.context_length,
-                    embedding_dimension,
-                    config.number_of_heads,
+                    config.model_width,
+                    config.num_heads,
                     config.dropout_rate,
                 )
-                for _ in range(config.number_of_layers)
+                for _ in range(config.model_depth)
             ]
         )
-        self.final_layer_norm = nn.LayerNorm(embedding_dimension)
-        self.lm_head = nn.Linear(embedding_dimension, config.vocab_size)
+        self.final_layer_norm = nn.LayerNorm(config.model_width)
+        self.lm_head = nn.Linear(config.model_width, config.vocab_size)
 
     @override
     def forward(
@@ -89,7 +86,7 @@ class BigramLanguageModel(nn.Module):
 
         token_embedding = self.token_embedding_table(inputs)
         position_embedding = self.position_embedding_table(
-            torch.arange(sequence_length, device=device)
+            torch.arange(sequence_length, device=inputs.device)
         )
         x = token_embedding + position_embedding
         x = self.blocks(x)
@@ -106,6 +103,8 @@ class BigramLanguageModel(nn.Module):
 
     def generate(self, inputs: torch.Tensor, max_new_tokens: int) -> torch.Tensor:
         for _ in range(max_new_tokens):
+            # Keep only the last context_length tokens: the model has no position
+            # embedding beyond that, so sequence_length in forward is at most context_length.
             cropped_inputs = inputs[:, -self.context_length :]
             logits, _ = self(cropped_inputs)
             logits = logits[:, -1, :]
@@ -124,21 +123,21 @@ class TransformerBlock(nn.Module):
     def __init__(
         self,
         context_length: int,
-        embedding_dimension: int,
-        number_of_heads: int,
+        model_width: int,
+        num_heads: int,
         dropout_rate: float,
     ):
         super().__init__()
         self.mh_sa = MultiHeadedSelfAttention(
             context_length,
-            embedding_dimension,
-            number_of_heads,
+            model_width,
+            num_heads,
             dropout_rate,
         )
-        self.ffwd = FeedForward(embedding_dimension, dropout_rate)
+        self.ffwd = FeedForward(model_width, dropout_rate)
         # feature normalization to get N(0,1) initialization
-        self.layer_norm_1 = nn.LayerNorm(embedding_dimension)
-        self.layer_norm_2 = nn.LayerNorm(embedding_dimension)
+        self.layer_norm_1 = nn.LayerNorm(model_width)
+        self.layer_norm_2 = nn.LayerNorm(model_width)
 
     @override
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -150,16 +149,14 @@ class TransformerBlock(nn.Module):
 class FeedForward(nn.Module):
     net: nn.Sequential
 
-    def __init__(self, embedding_dimension: int, dropout_rate: float):
+    def __init__(self, model_width: int, dropout_rate: float):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(
-                embedding_dimension, 4 * embedding_dimension
+                model_width, 4 * model_width
             ),  # 4x is the heuristic from Attention paper
             nn.ReLU(),
-            nn.Linear(
-                4 * embedding_dimension, embedding_dimension
-            ),  # projection to get output
+            nn.Linear(4 * model_width, model_width),  # projection to get output
             nn.Dropout(dropout_rate),
         )
 
@@ -179,32 +176,30 @@ class MultiHeadedSelfAttention(nn.Module):
     def __init__(
         self,
         context_length: int,
-        embedding_dimension: int,
+        model_width: int,
         num_heads: int,
         dropout_rate: float,
     ):
         super().__init__()
-        assert embedding_dimension % num_heads == 0, (
-            f"number of heads {num_heads} does not divide embedding dimension {embedding_dimension}"
+        assert model_width % num_heads == 0, (
+            f"number of heads {num_heads} does not divide model width {model_width}"
         )
         self.num_heads = num_heads
-        self.head_size = embedding_dimension // num_heads
+        self.head_size = model_width // num_heads
         self.qkv = nn.Linear(
-            embedding_dimension, 3 * embedding_dimension, bias=False
+            model_width, 3 * model_width, bias=False
         )  # Q, K, V matrices combined into one, and across num_heads of Attention
         self.register_buffer(
             "tril", torch.tril(torch.ones(context_length, context_length))
         )
         self.dropout = nn.Dropout(dropout_rate)
-        self.projection = nn.Linear(embedding_dimension, embedding_dimension)
+        self.projection = nn.Linear(model_width, model_width)
 
     @override
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        batch_length, sequence_length, embedding_dimension = inputs.shape  # (B, T, d)
+        batch_length, sequence_length, model_width = inputs.shape  # (B, T, d)
 
-        q, k, v = torch.split(
-            self.qkv(inputs), embedding_dimension, dim=-1
-        )  # 3 x (B, T, d)
+        q, k, v = torch.split(self.qkv(inputs), model_width, dim=-1)  # 3 x (B, T, d)
         q = q.view(
             batch_length, sequence_length, self.num_heads, self.head_size
         ).transpose(1, 2)  # (B, H, T, Q)
@@ -260,7 +255,7 @@ class MultiHeadedSelfAttention(nn.Module):
         return self.dropout(  # residual dropout
             self.projection(
                 out.contiguous().view(
-                    batch_length, sequence_length, embedding_dimension
+                    batch_length, sequence_length, model_width
                 )  # (B, T, d)
             )
         )
@@ -285,7 +280,7 @@ def get_raw_data() -> str:
 
 @torch.no_grad()
 def estimate_loss(
-    model: BigramLanguageModel,
+    model: TransformerLanguageModel,
     train_data: torch.Tensor,
     val_data: torch.Tensor,
     train_config: TrainConfig,
@@ -345,7 +340,7 @@ def main():
     logger.info(f"Loaded data {data.shape} {data[:100]}")
     model_config = ModelConfig(vocab_size=len(vocab))
     train_config = TrainConfig()
-    model = BigramLanguageModel(model_config).to(device)
+    model = TransformerLanguageModel(model_config).to(device)
     decoder_fn = decoder(int_to_string_mapping(vocab))
     logger.info(
         f"Before training {
