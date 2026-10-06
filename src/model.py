@@ -118,9 +118,9 @@ class TransformerLanguageModel(nn.Module):
 
     def get_compute_params(self) -> int:
         compute_params = self.get_total_params()
-        # No shared weights
+        # Lookup only, no matmul (unlike in nanoGPT where same weights are used for lm_head's matmul)
         compute_params -= self.token_embedding_table.weight.numel()
-        # Position embedding is fixed lookup and doesn't contribute to compute cost
+        # Lookup only, no matmul
         compute_params -= self.position_embedding_table.weight.numel()
         return compute_params
 
