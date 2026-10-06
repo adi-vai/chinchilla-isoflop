@@ -2,17 +2,17 @@
 
 Durable project state: what's decided, what's open, what's next. Complements
 `CLAUDE.md` (which holds the invariants and the phase plan) — this file tracks
-the moving parts. Last updated 2026-10-05.
+the moving parts. Last updated 2026-10-06.
 
 ## Glossary
 
-| Sym | Meaning | Code name (target) | nanoGPT |
+| Sym | Meaning | Code name | nanoGPT |
 |---|---|---|---|
 | `N` | parameter count | `num_params()` | `get_num_params()` |
 | `D` | training tokens, whole run | — | — |
 | `C` | training compute, FLOPs | — | — |
 | `L` | layers (depth) | `model_depth` | `n_layer` |
-| `H` | attention heads | `number_of_heads` | `n_head` |
+| `H` | attention heads | `num_heads` | `n_head` |
 | `Q` | head size, per-head width | `head_size` | `n_embd // n_head` |
 | `d` | residual-stream width | `model_width` | `n_embd` |
 | `T` | sequence length (≤ context length) | `sequence_length` / `context_length` | `block_size` |
@@ -52,9 +52,7 @@ The model and training loop are still in one file; the split into
 `src/model.py` and `src/train.py` comes with the harness.
 
 **Next steps, in order:**
-1. Renames: `BigramLanguageModel` → `TransformerLM`, `embedding_dimension` →
-   `model_width`, `number_of_layers` → `model_depth`. Device from
-   `inputs.device`; paths from `__file__`.
+1. Paths from `__file__` (with the `train.py` split).
 2. `num_params()`, with a pinned convention for embeddings and tied weights.
 
 ## Order of work for the rest of phase 3
@@ -75,7 +73,7 @@ promoting the model classes into a shared module both trees import — couples a
 teaching artifact to the experiment.
 
 **`src/` is a package, invoked as `uv run python -m src.<module>` from the repo
-root.** Puts the repo root on `sys.path`, so `from src.model import TransformerLM`
+root.** Puts the repo root on `sys.path`, so `from src.model import TransformerLanguageModel`
 resolves the same from a script, a notebook, or `plots/`.
 
 **Paths resolve from `__file__`, not the current working directory.** A sweep
@@ -116,7 +114,7 @@ losses incomparable across runs. The largest `D` in the sweep (largest `C`,
 smallest `N`) sets the minimum corpus size. Compute it before choosing a corpus —
 tinyshakespeare's 1.1MB will be nowhere near enough.
 
-**Naming: `TransformerLM`, `model_width`, `model_depth`.** Not `GPT`: although
+**Naming: `TransformerLanguageModel`, `model_width`, `model_depth`, `num_heads`.** Not `GPT`: although
 generative, pre-trained and transformer are all literally accurate (this *is*
 pre-training — next-token prediction from random init, no fine-tuning after),
 `GPT` reads as a reimplementation of OpenAI's model family. nanoGPT can use it
@@ -148,7 +146,7 @@ Why it's wrong: the scaling fixes the variance of a dot product. A score is
 isn't in that dot product. The two coincide only with a single head.
 
 Effect: scores have std ≈ 0.41 instead of 1 at `d=384, H=6`, so attention starts
-too uniform. The error factor is exactly `√number_of_heads`, so it varies with a
+too uniform. The error factor is exactly `√num_heads`, so it varies with a
 swept hyperparameter and biases runs against each other. The model partly
 compensates by learning larger `W_q`, `W_k`, which is why it still trains.
 
@@ -191,8 +189,6 @@ from the same init distribution but not the same values.
 - **`data/` gitignore rule** at the data-prep step. Reproducibility comes from
   `uv.lock` plus a documented download URL and checksum, not committed corpus bytes.
 - **`results/`** is created when the harness first logs.
-- **`NOTES.md` glossary column "Code name (target)"** reflects the planned renames;
-  current code still uses `embedding_dimension` / `number_of_layers`.
 
 ## nanoGPT reading list
 
