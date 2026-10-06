@@ -53,7 +53,7 @@ The model and training loop are still in one file; the split into
 
 **Next steps, in order:**
 1. Paths from `__file__` (with the `train.py` split).
-2. `num_params()`, with a pinned convention for embeddings and tied weights.
+2. `compute_parameters()` and `total_parameters()` on the model (convention below).
 
 ## Order of work for the rest of phase 3
 
@@ -125,7 +125,25 @@ size knobs read as a pair.
 Only nanoGPT's `model.py` informs the model code; `prepare.py` and `train.py`
 inform the harness.
 
-**`num_params()` lives on the model.** N is an axis of the whole experiment.
+**Two parameter counts, both on the model and both logged per run.**
+- `total_parameters`: every parameter.
+- `compute_parameters`: total minus the token and position embedding tables.
+  This is the `N` in `6N`. Embedding lookups do no matmul work; `lm_head` does and
+  is counted. (nanoGPT counts its token embedding because it is weight-tied to
+  `lm_head`; this model doesn't tie weights, so both tables are excluded.)
+
+Which count goes on the IsoFLOP plot's N axis is decided at plotting time —
+both are logged, so nothing needs rerunning. Relevant: Kaplan et al. counted
+non-embedding parameters, Chinchilla all parameters; Pearce & Song (2024),
+*Reconciling Kaplan and Chinchilla Scaling Laws*, argue this explains much of
+the gap between their exponents, most strongly at small scale.
+
+**Dropout is 0.0 for the sweep.** Single epoch means no repeated data, so
+nothing to overfit; dropout would only add noise and slow learning per token,
+depressing every point on the curve. The modules and `dropout_rate` stay (0.0
+is a pass-through) so tinyshakespeare experiments can keep 0.2. Check on the
+single-epoch guarantee: train and val loss should track closely; val clearly
+above train means data is being repeated somewhere.
 
 **Type checking: basedpyright, `recommended` mode, Any-reporting rules off**
 (config in `pyproject.toml`). `nn.Module.__call__` returns `Any`, so
