@@ -2,7 +2,7 @@
 
 Durable project state: what's decided, what's open, what's next. Complements
 `CLAUDE.md` (which holds the invariants and the phase plan) — this file tracks
-the moving parts. Last updated 2026-10-06.
+the moving parts. Last updated 2026-10-07.
 
 ## Glossary
 
@@ -57,8 +57,10 @@ The model and training loop are still in one file; the split into
 
 ## Order of work for the rest of phase 3
 
-model port → read nanoGPT items 2–4 → settle sweep design and corpus → build
-harness (`src/train.py`) → local dress rehearsal → rent GPU for the real sweep.
+~~model port~~ (done) → ~~read `prepare.py`~~ (done) → read `train.py` →
+**feasibility study** (corpus, tokenizer, C range, N grid, architecture — see
+below) → build harness (`src/train.py`) → local dress rehearsal → rent GPU for
+the real sweep.
 
 **Dress rehearsal:** a complete miniature IsoFLOP sweep on the laptop — 3–4 tiny
 models at one very small `C`, through to a CSV and a plotted U-curve. The point is
@@ -195,12 +197,47 @@ Steps, for reference:
 Copy weights rather than relying on seeds: fused and separate `Linear`s draw
 from the same init distribution but not the same values.
 
-## Open decisions
+## Feasibility study (next after `train.py`)
 
-- **What "sweeping model architecture" means** — how `model_depth` and
-  `model_width` move together to hit a target `N`, and whether `T` is held
-  fixed or scaled with `d` (which would hold the `T/(6d)` ratio constant).
-- **Corpus** — TinyStories vs an OpenWebText subset, gated on the largest `D`.
+Corpus, tokenizer and sweep design are one decision, not three: pick the
+corpus that supports the sweep the experiment needs. The study sets up the
+whole experiment; the harness after it is mostly implementation.
+
+**Binding constraint (single epoch).** At each `C` the smallest model gets the
+most tokens, so the run that needs the most data is always
+
+```
+D_max = C_max / flops_per_token(N_min at C_max)  ≤  training-split tokens
+```
+
+**Inputs:**
+1. Corpus size **in tokens** — depends on the tokenizer (char-level gives ~3–4×
+   the tokens of GPT-2 BPE for the same text). OpenWebText: ~9B train tokens
+   with GPT-2 BPE per nanoGPT's `openwebtext/prepare.py`. TinyStories: count it.
+2. Range of `C` — top set by GPU budget × realistic throughput and the
+   26 Oct deadline; bottom by the smallest model that still learns meaningfully.
+3. `N` spread at each `C` — wide enough for a clear U on both sides of the
+   optimum (typically ~10× smallest to largest).
+4. Architecture per `N` — how `model_depth` and `model_width` move together, and
+   whether `T` is fixed or scaled with `d` (holding the `T/(6d)` ratio fixed).
+5. `flops_per_token` per config — formula and parameter counts are in place.
+   Validate against nanoGPT's `scaling_laws.ipynb` (reading item 4).
+
+**Second criterion — meaningful at this scale, not just feasible.**
+TinyStories: narrow, simple distribution; tiny models learn it, but loss may
+flatten early and distort the fit. OpenWebText: closer to Chinchilla's data, so
+exponents are more comparable, but tiny models may all sit on the steep early
+part of the curve.
+
+**Vocabulary size feeds back into N.** `lm_head` is `d · V`; a 50k BPE vocabulary
+with small `d` makes it the largest layer of the smallest models.
+
+**Related harness requirements surfaced so far:**
+- A data loader that walks the corpus **without repetition** (sequential or
+  shuffled-without-replacement), stopping before it runs out. nanoGPT's
+  `get_batch` samples random offsets with replacement, which repeats some tokens
+  and skips others — that breaks single epoch.
+- Store tokens as `uint16` memmaps (vocab < 65,536), as in nanoGPT's `prepare.py`.
 
 ## Queued, not yet done
 
