@@ -33,6 +33,24 @@ Easy confusions:
   residual stream every block reads and writes, not just the embedding table's
   output. Depth (`L`) and width (`d`) are the two independent size knobs.
 - `B` never appears in FLOPs-per-token; batching is throughput, not per-token cost.
+- **Two different 12s.** `N ≈ 12·L·d²` is a *parameter count* (per layer:
+  W_q, W_k, W_v = 3d², output projection d², MLP up 4d², MLP down 4d²). Those are
+  weight matmuls, already priced by `6N`. `12·L·H·Q·T` is *compute with no
+  parameters*: the attention matmuls `QKᵀ` and `scores @ V`, where both operands
+  are activations. Derivation under "Compute exact FLOPs".
+- **Where the parameter-free matmuls sit.** Same forward pass, same layer, between
+  the weight matmuls — not a separate step and not outside learning. One attention
+  block: `x @ W_qkv` (weights, in 6N) → `Q @ Kᵀ` (activations only) → scale, mask,
+  softmax (elementwise, negligible) → `scores @ V` (activations only) → `@ W_o`
+  (weights, in 6N). Backward runs the same chain in reverse: gradients must pass
+  *through* `QKᵀ` and `scores @ V` to reach W_q, W_k, W_v, so those matmuls get
+  backward costs too (gradients w.r.t. both operands, ~2× forward), but produce no
+  weight gradients. `6N` counts FLOPs per parameter, so it misses them. Why they
+  grow with `T`: weight matmuls act on each token independently (cost per token
+  fixed), attention mixes every token with every other (cost per token ∝ `T`).
+- **Matmul cost rule.** `(m×k)(k×n)` costs `2·m·n·k` FLOPs: `m·n` outputs, each a
+  length-`k` dot product, one multiply + one add per term. The contracted `k`
+  counts once (so `QKᵀ` is `2·T²·Q`, not `T²Q²`).
 
 ## Where things stand
 
@@ -110,6 +128,22 @@ iterations = D / (B · T)
 Cosine LR decays to its minimum at exactly that run's `iterations` (CLAUDE.md
 constraint). `iterations` must be rounded, so **recompute and log the realised C**
 from the rounded count — the IsoFLOP curve plots what was spent, not what was asked for.
+
+**Schedule shape: cosine (decided); warmup-stable-decay (WSD) only as a budget
+fallback.** Two separate questions — the schedule's *shape and length* (decided
+here) and its *peak LR* per `N` (open, feasibility input 6).
+- Cosine is what Chinchilla used, so the replication stays methodologically
+  faithful, and it has no extra knobs. Its cost: the curve is stretched to the
+  run's total length, so every `(N, C)` pair is a separate run from scratch.
+- WSD: warmup → hold peak LR constant → short cooldown (~last 10–20%) to near
+  zero. The constant phase doesn't depend on total length, so one run per `N`
+  can fork cooldowns at several `D`s, i.e. several budgets per run — potentially
+  much cheaper. Hägele et al. 2024 (*Scaling Laws and Compute-Optimal Training
+  Beyond Fixed Training Durations*) report cooldowns matching cosine (verify).
+  Costs: departs from Chinchilla's method, adds checkpoint forking and cooldown
+  length/shape as new settings.
+- Switch to WSD only if the feasibility study shows the full cosine grid
+  doesn't fit the budget — and then change the rule in CLAUDE.md deliberately.
 
 **Single epoch.** Chinchilla's laws assume fresh tokens; repeating data makes
 losses incomparable across runs. The largest `D` in the sweep (largest `C`,
@@ -215,19 +249,46 @@ D_max = C_max / flops_per_token(N_min at C_max)  ≤  training-split tokens
    the tokens of GPT-2 BPE for the same text). OpenWebText: ~9B train tokens
    with GPT-2 BPE per nanoGPT's `openwebtext/prepare.py`. TinyStories: count it.
 2. Range of `C` — top set by GPU budget × realistic throughput and the
-   26 Oct deadline; bottom by the smallest model that still learns meaningfully.
+   timeline (band 1 first; later bands can follow once it works); bottom by the
+   smallest model that still learns meaningfully. Budget GPU-hours at a realistic
+   utilisation for small matmuls (more like 10–30% of peak than 50%+).
 3. `N` spread at each `C` — wide enough for a clear U on both sides of the
    optimum (typically ~10× smallest to largest).
 4. Architecture per `N` — how `model_depth` and `model_width` move together, and
    whether `T` is fixed or scaled with `d` (holding the `T/(6d)` ratio fixed).
 5. `flops_per_token` per config — formula and parameter counts are in place.
    Validate against nanoGPT's `scaling_laws.ipynb` (reading item 4).
+6. **Peak LR (and batch size) as a function of `N` — currently undecided.** Only
+   the schedule *shape and length* are settled (cosine; see Decisions) (cosine decays at each run's own
+   `iterations`). Chinchilla gives a per-size LR table, not a rule, and its
+   smallest model is larger than most of ours — following it means extrapolating
+   below its range. Porian et al. 2024 (*Resolving Discrepancies in
+   Compute-Optimal Scaling*) find untuned LR/batch size moves the optimum enough to
+   explain much of the Kaplan–Chinchilla gap at small scale. To decide: what rule,
+   where it comes from, and a cheap check that it holds at this scale (where in
+   the `N` range would a mismatch distort the U-curve most?).
+7. **Measurement resolution.** Near the minimum, neighbouring `N` may differ by
+   ~0.01 in loss. Is the val set large enough, and run-to-run noise small enough
+   (e.g. one config × 2 seeds), to resolve that? Otherwise the minimum is noise.
+8. **Unique tokens, not raw tokens.** TinyStories reportedly has ~20% exact
+   duplicates (measure it in the study) and
+   some train/val leakage. The single-epoch bound applies to deduplicated train
+   tokens, and contamination must be fixed before any val loss is trusted.
 
 **Second criterion — meaningful at this scale, not just feasible.**
 TinyStories: narrow, simple distribution; tiny models learn it, but loss may
 flatten early and distort the fit. OpenWebText: closer to Chinchilla's data, so
 exponents are more comparable, but tiny models may all sit on the steep early
 part of the curve.
+
+**Prior evidence on this corpus (citation not yet verified — check it exists
+and says this before relying on it).** Bryant & Liu 2026, *Practical Scaling Laws*
+(arXiv 2605.09189), train transformers on TinyStories up to ~74M params (~206
+A10G GPU-hours). Their grid shows which `N`/`C` ranges gave informative curves
+here, and they use a warmup-stable-decay schedule with cooldown forks (see the
+schedule decision: a budget fallback only). Their thesis —
+Chinchilla's form mishandles data-constrained/repeated regimes — is exactly what
+the single-epoch bound guards against.
 
 **Vocabulary size feeds back into N.** `lm_head` is `d · V`; a 50k BPE vocabulary
 with small `d` makes it the largest layer of the smallest models.
