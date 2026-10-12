@@ -91,7 +91,9 @@ class TransformerLanguageModel(nn.Module):
         x = token_embedding + position_embedding
         x = self.blocks(x)
         x = self.final_layer_norm(x)
-        logits = self.lm_head(x)
+        logits = self.lm_head(
+            x
+        )  # FLOPs[6n]: Linear(d, V), dV params (not part of 12·L·d²)
 
         if targets is None:
             loss = None
@@ -164,10 +166,14 @@ class FeedForward(nn.Module):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(
-                model_width, 4 * model_width
+                model_width,
+                4 * model_width,  # FLOPs[6n]: Linear(d, 4d), 4d² params
             ),  # 4x is the heuristic from Attention paper
             nn.ReLU(),
-            nn.Linear(4 * model_width, model_width),  # projection to get output
+            nn.Linear(
+                4 * model_width,
+                model_width,  # FLOPs[6n]: Linear(4d, d), 4d² params
+            ),  # projection to get output
             nn.Dropout(dropout_rate),
         )
 
@@ -210,7 +216,11 @@ class MultiHeadedSelfAttention(nn.Module):
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         batch_length, sequence_length, model_width = inputs.shape  # (B, T, d)
 
-        q, k, v = torch.split(self.qkv(inputs), model_width, dim=-1)  # 3 x (B, T, d)
+        q, k, v = torch.split(
+            self.qkv(inputs),  # FLOPs[6n]: Linear(d, 3d), 3d² params
+            model_width,
+            dim=-1,
+        )  # 3 x (B, T, d)
         q = q.view(
             batch_length, sequence_length, self.num_heads, self.head_size
         ).transpose(1, 2)  # (B, H, T, Q)
@@ -235,7 +245,11 @@ class MultiHeadedSelfAttention(nn.Module):
         ), (
             f"Incorrect view for K^T {k_transpose.shape}, expect {(batch_length, self.num_heads, self.head_size, sequence_length)}"
         )
-        weights = q @ k_transpose * self.head_size**-0.5  # (B, H, T, T)
+        weights = (
+            q
+            @ k_transpose  # FLOPs[attn]: (T, Q) @ (Q, T) per head, per seeq = 2·T·Q·T = 2QT² forward pass, 4QT² backwards pass = 6QT²
+            * self.head_size**-0.5
+        )  # (B, H, T, T)
         assert weights.shape == (
             batch_length,
             self.num_heads,
@@ -261,11 +275,16 @@ class MultiHeadedSelfAttention(nn.Module):
         ), (
             f"Incorrect view for V {v.shape}, expect {(batch_length, self.num_heads, sequence_length, self.head_size)}"
         )
-        out = (weights @ v).transpose(1, 2)
+        out = (
+            (
+                weights
+                @ v  # FLOPs[attn]: (T, T) @ (T, Q) per head, per seq = 2·T·T·Q = 2QT² forward pass, 4QT² backwards pass = 6QT²
+            ).transpose(1, 2)
+        )
         # (B, H, T, T) @ (B, H, T, Q) = (B, H, T, Q) -> (B, T, H, Q)
         return self.dropout(  # residual dropout
             self.projection(
-                out.contiguous().view(
+                out.contiguous().view(  # FLOPs[6n]: Linear(d, d), d² params
                     batch_length, sequence_length, model_width
                 )  # (B, T, d)
             )
