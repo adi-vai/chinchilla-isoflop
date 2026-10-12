@@ -247,7 +247,7 @@ class MultiHeadedSelfAttention(nn.Module):
         )
         weights = (
             q
-            @ k_transpose  # FLOPs[attn]: (T, Q) @ (Q, T) per head, per seeq = 2·T·Q·T = 2QT² forward pass, 4QT² backwards pass = 6QT²
+            @ k_transpose  # FLOPs[attn]: (T, Q) @ (Q, T) per head, per seq = 2·T·Q·T = 2QT² forward pass, 4QT² backwards pass = 6QT²
             * self.head_size**-0.5
         )  # (B, H, T, T)
         assert weights.shape == (
@@ -283,8 +283,8 @@ class MultiHeadedSelfAttention(nn.Module):
         )
         # (B, H, T, T) @ (B, H, T, Q) = (B, H, T, Q) -> (B, T, H, Q)
         return self.dropout(  # residual dropout
-            self.projection(
-                out.contiguous().view(  # FLOPs[6n]: Linear(d, d), d² params
+            self.projection(  # FLOPs[6n]: Linear(d, d), d² params
+                out.contiguous().view(
                     batch_length, sequence_length, model_width
                 )  # (B, T, d)
             )
