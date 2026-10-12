@@ -259,8 +259,8 @@ D_max = C_max / flops_per_token(N_min at C_max)  ≤  training-split tokens
 5. `flops_per_token` per config — formula and parameter counts are in place.
    Validate against nanoGPT's `scaling_laws.ipynb` (reading item 4).
 6. **Peak LR (and batch size) as a function of `N` — currently undecided.** Only
-   the schedule *shape and length* are settled (cosine; see Decisions) (cosine decays at each run's own
-   `iterations`). Chinchilla gives a per-size LR table, not a rule, and its
+   the schedule *shape and length* are settled (cosine, decaying at each run's own
+   `iterations`; see Decisions). Chinchilla gives a per-size LR table, not a rule, and its
    smallest model is larger than most of ours — following it means extrapolating
    below its range. Porian et al. 2024 (*Resolving Discrepancies in
    Compute-Optimal Scaling*) find untuned LR/batch size moves the optimum enough to
@@ -281,8 +281,8 @@ flatten early and distort the fit. OpenWebText: closer to Chinchilla's data, so
 exponents are more comparable, but tiny models may all sit on the steep early
 part of the curve.
 
-**Prior evidence on this corpus (citation not yet verified — check it exists
-and says this before relying on it).** Bryant & Liu 2026, *Practical Scaling Laws*
+**Prior evidence on this corpus (confirmed on arXiv to exist and cover this,
+from a summary only — read the relevant sections before citing).** Bryant & Liu 2026, *Practical Scaling Laws*
 (arXiv 2605.09189), train transformers on TinyStories up to ~74M params (~206
 A10G GPU-hours). Their grid shows which `N`/`C` ranges gave informative curves
 here, and they use a warmup-stable-decay schedule with cooldown forks (see the
