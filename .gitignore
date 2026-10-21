@@ -15,3 +15,6 @@ wheels/
 
 # Scratch files
 scratch/
+
+# Generated corpus data (reproduced by data/*/prepare.py)
+data/**/*.bin
