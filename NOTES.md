@@ -2,7 +2,7 @@
 
 Durable project state: what's decided, what's open, what's next. Complements
 `CLAUDE.md` (which holds the invariants and the phase plan) — this file tracks
-the moving parts. Last updated 2026-10-07.
+the moving parts. Last updated 2026-10-21.
 
 ## Glossary
 
@@ -75,10 +75,12 @@ The model and training loop are still in one file; the split into
 
 ## Order of work for the rest of phase 3
 
-~~model port~~ (done) → ~~read `prepare.py`~~ (done) → read `train.py` →
-**feasibility study** (corpus, tokenizer, C range, N grid, architecture — see
-below) → build harness (`src/train.py`) → local dress rehearsal → rent GPU for
-the real sweep.
+~~model port~~ (done) → ~~read `prepare.py`~~ (done) → ~~read `train.py`~~ (done
+16 Oct) → **pilot band 1 design** (21 Oct — replaces the full feasibility study; see
+"Pilot band 1 plan" below) → data prep (TinyStories: download, dedup, contamination)
+→ 2K BPE tokenizer, freeze `train.bin`/`val.bin` → harness (`src/train.py`) → local
+dress rehearsal → GPU smoke test → **LR check → pilot band 1** → decide corpus →
+full sweep.
 
 **Dress rehearsal:** a complete miniature IsoFLOP sweep on the laptop — 3–4 tiny
 models at one very small `C`, through to a CSV and a plotted U-curve. The point is
@@ -231,7 +233,94 @@ Steps, for reference:
 Copy weights rather than relying on seeds: fused and separate `Linear`s draw
 from the same init distribution but not the same values.
 
-## Feasibility study (next after `train.py`)
+## Pilot band 1 plan (decided 21 Oct)
+
+The full multi-band feasibility study is deferred: the corpus question can't be
+settled from papers, and at TinyStories scale a pilot band costs pennies. Design
+the pilot so it answers that question; design the full sweep after the result.
+The "Feasibility study" section below remains the reference for inputs.
+
+### Decided
+- **Corpus: TinyStories, provisional.** Single-epoch. With a 2K BPE tokenizer
+  Bryant & Liu use up to 5×10⁸ unique tokens → expect ~0.5B (count after the
+  tokenizer). That supports single-epoch bands with optima up to roughly 5–10M
+  params (smallest model needs D = C/(6·N_min) ≤ corpus).
+- **Staged spend: £200 committed; up to ~£1k only after band 1 works.** Rule: stage 1
+  is a *subset* of the full plan, never a separate mini-plan. Locked at band 1, so
+  choose for the ceiling: corpus, tokenizer, depth/width rule, held-out eval set, LR
+  rule. Freely extendable later: higher bands, seeds, extra sizes in a band.
+  Rough H100 scale (Oct 2026: ~$2–3/h ≈ £2/h; small-model MFU 10–30%): £200 ≈ 100
+  H100-h ≈ 7×10¹⁹ FLOPs at 20% MFU. TinyStories single-epoch bands cost far less —
+  data, not money, binds.
+- **Sequence:** CPU/MPS smoke → GPU smoke (launch, log, checkpoint; loss starts near
+  ln 2000 ≈ 7.6 nats and falls) → **LR check** → **pilot band** → decide. Keep the
+  pipeline test and the science test separate: a harness bug must not masquerade as
+  "TinyStories flattens".
+- **Pilot band = the hardest band TinyStories supports**: the highest single-epoch
+  `C`, optimum ~5–10M, so flattening (most likely at large N) is tested where it
+  bites. Clean there ⇒ lower bands are fine too.
+- **LR check before the band**, on the band's sizes — otherwise an untuned fixed LR
+  can flatten the U and get blamed on the corpus (Porian et al.).
+- **Pass/fail criterion (pre-registered — write numbers before any run):**
+  - Approach 2 per band: fit a **parabola in log N**; the vertex is the optimum.
+  - *Shape:* edge points ≥ X% above the minimum loss (working X = 3–5%; this project's
+    threshold, **not** a Chinchilla criterion — Chinchilla sets no such number, and
+    depth mostly reflects how wide the N span is).
+  - *Location:* vertex **inside** the swept range, and its uncertainty small — e.g.
+    a second seed at 2–3 sizes or a bootstrap over points moves the vertex by
+    < ~1.5× in N.
+  - ~6–7 well-spread sizes, with margin either side (optimum location unknown in
+    advance). Vertex near an edge ⇒ shift the range and rerun, not a fail.
+- **Switch-corpus rule:** pilot verdict is scientific only — no clean, well-located U
+  at the highest feasible TinyStories band ⇒ switch to an OpenWebText-scale corpus
+  (cost: data-prep hours, not money). Full-sweep economics (many points on a small
+  corpus vs fewer on a large one) is a separate, later decision. Caveat for the
+  write-up: a tight fit on TinyStories is a methods result; its exponents aren't
+  comparable to Chinchilla's web-text numbers.
+- **Which N goes where (two jobs, only one is a choice):**
+  - *Compute / IsoFLOP constraint — not a choice:* FLOPs/token = 6·N_compute +
+    12·L·T·d. N_compute = params that do matmuls per token: **exclude** the
+    embedding lookup (indexing, ~0 FLOPs), **include** the output layer d×V. With
+    tied weights (nanoGPT ties wte/lm_head) one matrix is one param block but two
+    uses — free lookup + costly matmul. Using total N here over-counts FLOPs by the
+    embedding share, largest at small N ⇒ smallest models get too few tokens (an
+    N-dependent bias).
+  - *Reporting / fit x-axis — a choice:* **primary = N_total incl. embeddings**
+    (Chinchilla convention; matters most at small N — at 2K vocab, d=64 the
+    embedding is ~128K params vs ~200K in a 4-layer stack). **Robustness = refit with
+    non-embedding N** (Kaplan convention) — same runs, second fit, free. Pearce & Song
+    2024 (*Reconciling Kaplan and Chinchilla*) reportedly attribute much of the
+    Kaplan–Chinchilla gap to this choice at small scale — **verify before citing**.
+  - Check Chinchilla's own FLOP conventions via nanoGPT `scaling_laws.ipynb` against
+    `get_compute_params`; record which convention is followed and why.
+- **Bryant & Liu (arXiv 2605.09189): defaults only, not a comparison target.** They
+  study the data-constrained regime (fixed unique D, T ≫ D, 5–5000 epochs, WSD +
+  cooldown forks, fixed LR 3e-4 and batch 16K tokens for every N). This project is
+  compute-constrained, single-epoch, D = T. Using their fitted law at D = T would be
+  extrapolating outside their regime — don't. Usable: 2K BPE, context 256, AdamW
+  (0.9, 0.95), wd 0.1, warmup 500; their ladder (d_model, n_layer, n_head, d_ff) ∈
+  {(64,4,4,256), (128,4,4,512), (192,6,6,768), (320,8,8,1280), (480,10,8,1920)} →
+  N ∈ {344K, 1.1M, 3.1M, 10.6M, 28.8M}. Note their disclosed config drift (W=100 vs
+  500 on the 30M runs) — the honesty standard for this write-up.
+
+### Open — to settle before the pilot runs
+1. **N ladder:** 6–7 (L, d) pairs spanning ~1–30M; depth/width rule; compare with
+   B&L's ladder. N ≈ 12·L·d² + 2000·d (plus output layer if untied).
+2. **Context T:** fixed 256 (as B&L) or scaled with d (holding T/(6d) fixed)?
+3. **Band compute C:** highest single-epoch C given the token count and N_min.
+4. **LR check plan:** which sizes, which LR values, how many steps; batch size.
+5. **Seeds:** which 2–3 sizes get a second seed for the location test.
+6. **Cost / wall-clock estimate** for LR check + pilot band.
+7. **Exact token count** (after the tokenizer) — replaces the ~0.5B estimate.
+
+### Harness additions from this plan
+- **Log MFU per run**: tokens/s × FLOPs/token ÷ peak. Same 6N + 12·L·T·d formula
+  (PaLM appendix reportedly defines MFU with this attention term — verify).
+- Small models underuse an H100: consider **several small runs per GPU
+  concurrently**. Cheap wins: bf16 autocast, `scaled_dot_product_attention`
+  (FlashAttention), fused AdamW, no per-step `.item()` syncs; `torch.compile` last.
+
+## Feasibility study (reference inputs; superseded in scope by the pilot plan above)
 
 Corpus, tokenizer and sweep design are one decision, not three: pick the
 corpus that supports the sweep the experiment needs. The study sets up the
@@ -267,13 +356,52 @@ D_max = C_max / flops_per_token(N_min at C_max)  ≤  training-split tokens
    explain much of the Kaplan–Chinchilla gap at small scale. To decide: what rule,
    where it comes from, and a cheap check that it holds at this scale (where in
    the `N` range would a mismatch distort the U-curve most?).
+   *15 Oct (get_lr reading):* `min_lr` = peak/10 in nanoGPT, so this is one
+   open value (peak LR vs `N`), not two.
 7. **Measurement resolution.** Near the minimum, neighbouring `N` may differ by
    ~0.01 in loss. Is the val set large enough, and run-to-run noise small enough
    (e.g. one config × 2 seeds), to resolve that? Otherwise the minimum is noise.
-8. **Unique tokens, not raw tokens.** TinyStories reportedly has ~20% exact
-   duplicates (measure it in the study) and
-   some train/val leakage. The single-epoch bound applies to deduplicated train
-   tokens, and contamination must be fixed before any val loss is trusted.
+   *Decided 16 Oct (eval):* the number fed into the fit is **one final eval at the
+   last step** (LR fully decayed), on the **full fixed held-out set**, same for every
+   run. Rejected: best-val checkpoint (min of noisy evals biases low; more evals on
+   longer runs → bias varies across the sweep). Considered: averaging all evals within
+   an LR band near `min_lr` — the band is a fixed fraction of every run (cosine
+   depends only on t/T), and a bias constant across `N` at fixed `C` doesn't move the
+   Approach-2 argmin. But (a) uniformity across `N` is an assumption at ~0.01
+   resolution, (b) evals-per-band vary with run length unless `eval_interval` scales
+   with the run, (c) on a fixed val set, re-scoring the same tokens doesn't reduce
+   sampling noise — it only smooths weight jitter, small at min LR. Same compute in
+   one bigger final eval gives the same noise reduction with zero bias.
+   **Diagnostic:** also log the LR-band average (evals at fixed fractions of the
+   run). If its argmin matches the final-eval argmin at every `C`, that's evidence
+   the bias is uniform; if not, investigate. Intermediate evals otherwise =
+   monitoring only. Eval is forward-only (~2N/token) and changes no weights, so it
+   is outside `C` but inside the GPU budget.
+   **Open: how many held-out tokens for the final eval?** Needs (a) how flat the
+   IsoFLOP minimum is (rough guide: Bryant & Liu's curves) and (b) per-token loss
+   variance (measure from any short run); standard error ∝ 1/√tokens.
+   Also: eval overhead ratio ≈ (2 splits × eval_iters × 2N) / (eval_interval × 6N)
+   — compute it for the chosen settings.
+8. **Unique tokens, not raw tokens.** *Measured 21 Oct* (`data/tinystories/prepare.py`,
+   exact sha256 match on story text):
+   - Train 2,119,719 stories; **320,470 exact duplicates (15.1%)** — not the ~20%
+     previously reported. Whitespace normalisation finds no extra duplicates, so
+     exact matching is the rule. None in the first 10k rows: the head of the
+     dataset isn't representative — sample with `shuffle(seed)` when testing.
+   - Validation 21,990 stories, no internal duplicates; **6,601 (30.0% of
+     validation) also appear verbatim in train**, each exactly once (0.31% of train).
+   - **Decision:** remove contaminated stories from **train**, keep the official
+     validation split intact (costs 0.3% of train; keeps the eval set others use
+     and its precision). Unremoved, ~30% of val loss would measure memorisation,
+     which grows with N — an N-correlated bias toward larger optima.
+   - Clean train: **1,792,648 stories (84.6%)**. The single-epoch bound applies to
+     these; token count pending the tokenizer (open item 7).
+9. **Warmup per run (open).** nanoGPT: 2k of 600k iters (1/300), fixed count.
+   Warmup exists so Adam's second-moment estimate `v` settles; its memory is
+   ~1/(1−β2) steps (β2 = 0.95 → ~20), and it needs a few of those (~60–100
+   steps). Candidates: pure fraction of `iterations`, or
+   max(fraction × iterations, floor). Whether the floor binds depends on the
+   shortest run's iteration count — which comes out of this study.
 
 **Second criterion — meaningful at this scale, not just feasible.**
 TinyStories: narrow, simple distribution; tiny models learn it, but loss may
@@ -299,11 +427,26 @@ with small `d` makes it the largest layer of the smallest models.
   `get_batch` samples random offsets with replacement, which repeats some tokens
   and skips others — that breaks single epoch.
 - Store tokens as `uint16` memmaps (vocab < 65,536), as in nanoGPT's `prepare.py`.
+- **Gradient accumulation (16 Oct, train.py pass c).** Effective batch is the
+  scientific variable (tied to `N`, open in input 6); the micro-batch / accumulation
+  split is engineering only — mathematically identical to one big batch given the
+  loss scaling below (no dropout/batchnorm). Per run: `accum_steps = effective_batch /
+  (micro_batch × T)`, must divide evenly; micro-batch is memory-bound and shrinks as
+  `N` grows, so `accum_steps` grows with `N`. Iterations = D / (accum_steps ×
+  micro_batch × T). The split doesn't change FLOPs.
+- **Scale each micro-batch loss by 1/accum_steps before `backward()`.** `.grad`
+  accumulates by summation, so unscaled it holds k·∇L. Adam's m/√v hides that, but
+  gradient clipping doesn't — and k grows with `N`, so a missed scaling would clip
+  larger models harder: an `N`-correlated confounder (same pattern as √n_heads).
+- **Log the true loss:** multiply the scaled loss back by `accum_steps` before logging.
+- **Log per run: pre-clip gradient norm and fraction of steps clipped.** Even with
+  correct scaling, a fixed clip threshold (nanoGPT: 1.0) can bind differently across
+  `N`. If the clipped fraction trends with `N`, it's a confounder to fix before fitting.
 
 ## Queued, not yet done
 
-- **`data/` gitignore rule** at the data-prep step. Reproducibility comes from
-  `uv.lock` plus a documented download URL and checksum, not committed corpus bytes.
+- ~~`data/` gitignore rule~~ — done 21 Oct: `data/**/*.bin` ignored. Reproducibility
+  comes from `uv.lock` + `prepare.py` + the HF dataset ID, not committed corpus bytes.
 - **`results/`** is created when the harness first logs.
 
 ## nanoGPT reading list
@@ -328,6 +471,7 @@ they live relative to `results/`?*
 - (b) `get_lr(it)` — cosine with linear warmup. nanoGPT's `lr_decay_iters` is one
   global; here it is computed per run from that run's `iterations`.
 - (c) the loop: gradient accumulation, eval, checkpointing on best val loss.
+  *Done 16 Oct* — decisions in input 7 (eval) and harness requirements (accumulation).
   Skip DDP (multi-GPU is cut-material per CLAUDE.md).
 
 Out of scope: `configurator.py`'s `exec()`-based `sys.argv` override. The
