@@ -54,6 +54,17 @@ Easy confusions:
 
 ## Where things stand
 
+**Handoff, end of 22 Oct.** Data is ready: `data/tinystories/` holds the cleaned,
+tokenized TinyStories (`train.bin` 447,014,068 tokens, `val.bin` 5,355,327, frozen
+2K byte-level BPE `tokenizer.json`), reproducible via
+`uv run python -m data.tinystories.prepare` (verified: two independent runs give
+identical output). **Next session (23 Oct): pilot-plan open items 1 and 3** — the
+N ladder (6–7 `(L, d)` pairs, depth/width rule, vs Bryant & Liu's) and the band's
+compute `C`, from `D_max = C / flops_per_token(N_min) ≤ 447M` train tokens (both
+the user's to work through). Then items 2 and 4–6, then the harness. The
+near-duplicate contamination estimate (item 8) is independent and doesn't block.
+The `.bin` files are gitignored; a fresh checkout must rerun `prepare` (~4 min).
+
 Phases 1–2 done (`learning/`). Phase 3 (harness) in progress.
 
 `src/model.py` exists: a port of `learning/better_bigram.py` with full type
@@ -77,8 +88,9 @@ The model and training loop are still in one file; the split into
 
 ~~model port~~ (done) → ~~read `prepare.py`~~ (done) → ~~read `train.py`~~ (done
 16 Oct) → **pilot band 1 design** (21 Oct — replaces the full feasibility study; see
-"Pilot band 1 plan" below) → data prep (TinyStories: download, dedup, contamination)
-→ 2K BPE tokenizer, freeze `train.bin`/`val.bin` → harness (`src/train.py`) → local
+"Pilot band 1 plan" below) → ~~data prep (TinyStories: download, dedup,
+contamination)~~ (done 21 Oct) → ~~2K BPE tokenizer, freeze `train.bin`/`val.bin`~~
+(done 22 Oct) → **pilot open items: N ladder, band C, …** (next) → harness (`src/train.py`) → local
 dress rehearsal → GPU smoke test → **LR check → pilot band 1** → decide corpus →
 full sweep.
 
