@@ -2,7 +2,7 @@
 
 Durable project state: what's decided, what's open, what's next. Complements
 `CLAUDE.md` (which holds the invariants and the phase plan) — this file tracks
-the moving parts. Last updated 2026-10-21.
+the moving parts. Last updated 2026-10-22.
 
 ## Glossary
 
@@ -245,6 +245,23 @@ The "Feasibility study" section below remains the reference for inputs.
   Bryant & Liu use up to 5×10⁸ unique tokens → expect ~0.5B (count after the
   tokenizer). That supports single-epoch bands with optima up to roughly 5–10M
   params (smallest model needs D = C/(6·N_min) ≤ corpus).
+- **Tokenizer: byte-level BPE, vocab 2,000 (decided 22 Oct).** Configuration in
+  `build_tokenizer()` (`data/tinystories/prepare.py`): byte-level pre-tokenizer, full
+  256-byte initial alphabet (any text encodes, nothing silently dropped), one special
+  token `<|endoftext|>` between stories. Frozen tokenizer trained on **all 1,792,648
+  cleaned train stories**. Evidence (`data/tinystories/vocab_sweep.py`: trained on a
+  100k cleaned-train sample, measured on the full validation split):
+
+  | V | 500 | 1,000 | 2,000 | 4,000 | 8,000 | 10,000 |
+  |---|---|---|---|---|---|---|
+  | chars/token | 2.29 | 3.04 | 3.60 | 3.94 | 4.11 | 4.12 |
+
+  Gain per doubling roughly halves (+33%, +18%, +9%, +4%); flat above 8K. Cost side:
+  each entry costs `d` params in the embedding and `d` in `lm_head`; at `d = 64`,
+  2K → 4K adds 128K `lm_head` params (~13% of a ~1M-param smallest model) for 9%
+  better compression. 2K sits before that trade turns bad for the smallest models.
+  Reminder: loss in nats/token is only comparable under this one tokenizer — convert
+  to bits per character/byte for any cross-tokenizer comparison.
 - **Staged spend: £200 committed; up to ~£1k only after band 1 works.** Rule: stage 1
   is a *subset* of the full plan, never a separate mini-plan. Locked at band 1, so
   choose for the ceiling: corpus, tokenizer, depth/width rule, held-out eval set, LR
@@ -312,6 +329,15 @@ The "Feasibility study" section below remains the reference for inputs.
 5. **Seeds:** which 2–3 sizes get a second seed for the location test.
 6. **Cost / wall-clock estimate** for LR check + pilot band.
 7. **Exact token count** (after the tokenizer) — replaces the ~0.5B estimate.
+8. **Near-duplicate contamination estimate (logged 21 Oct).** Exact sha256 matching
+   only catches *verbatim* val→train leakage. TinyStories is synthetic and formulaic,
+   so near-copies (a changed name, a reworded sentence) are likely, and near-duplicate
+   memorisation is N-correlated in the same direction as exact. Plan: on a random
+   sample of ~1,000 val stories (`shuffle(seed)` — the dataset head isn't
+   representative), measure n-gram overlap / MinHash similarity against clean train;
+   report the fraction above a stated threshold. Outcome decides: small ⇒ stated
+   limitation in the write-up; material ⇒ consider removal. ~1 hour; does **not**
+   block the tokenizer.
 
 ### Harness additions from this plan
 - **Log MFU per run**: tokens/s × FLOPs/token ÷ peak. Same 6N + 12·L·T·d formula

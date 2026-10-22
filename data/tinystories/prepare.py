@@ -5,8 +5,11 @@ import os
 from hashlib import sha256
 
 import numpy as np
-import tiktoken
-from datasets import load_dataset
+from datasets import Dataset, load_dataset
+from tokenizers import Tokenizer
+from tokenizers.models import BPE
+from tokenizers.pre_tokenizers import ByteLevel
+from tokenizers.trainers import BpeTrainer
 from tqdm import tqdm
 
 logging.basicConfig(level=logging.INFO)
@@ -15,7 +18,8 @@ logger = logging.getLogger(__name__)
 num_proc = 5  # 10 cores // 2
 
 num_proc_load_dataset = num_proc
-enc = tiktoken.get_encoding("gpt2")  # tokenizer? gpt2 or character encoding?
+
+END_OF_TEXT = "<|endoftext|>"  # separates stories in the token stream
 
 
 def text_digest(text: str) -> str:
@@ -23,15 +27,35 @@ def text_digest(text: str) -> str:
     return sha256(text.encode("utf-8")).hexdigest()
 
 
-if __name__ == "__main__":
+def build_tokenizer(vocab_size: int) -> tuple[Tokenizer, BpeTrainer]:
+    # Shared by the vocab sweep and the frozen tokenizer, so the sweep's evidence
+    # applies to exactly the configuration that gets frozen
+    tokenizer = Tokenizer(BPE())
+    tokenizer.pre_tokenizer = ByteLevel()
+    trainer = BpeTrainer(
+        special_tokens=[END_OF_TEXT],
+        vocab_size=vocab_size,
+        initial_alphabet=ByteLevel.alphabet(),
+    )
+    return tokenizer, trainer
+
+
+def load_clean_splits() -> tuple[Dataset, Dataset]:
+    """Load TinyStories; return (cleaned train, validation).
+
+    Train is cleaned by dropping stories that also appear in validation (all
+    copies) and exact duplicates (first occurrence kept). Validation is the
+    official split, unchanged.
+    """
     dataset = load_dataset("roneneldan/TinyStories", num_proc=num_proc_load_dataset)
     logger.info(f"Loaded dataset: {dataset}")
 
     train = dataset["train"]
+    validation = dataset["validation"]
     num_train = len(train)
 
     # Contamination: digests of every validation story
-    val_digests = {text_digest(s) for s in dataset["validation"]["text"]}
+    val_digests = {text_digest(s) for s in validation["text"]}
 
     # Exact dedup + drop train stories that appear in validation (all copies)
     seen: set[str] = set()
@@ -65,4 +89,12 @@ if __name__ == "__main__":
     logger.info(f"Exact duplicates removed: {duplicate_count:,} ({pct_duplicates:.2%})")
     logger.info(f"Train stories after cleaning: {len(cleaned):,} ({pct_kept:.2%} kept)")
 
-    # Next, train a 2k tokenizer on cleaned train set
+    return cleaned, validation
+
+
+if __name__ == "__main__":
+    cleaned, validation = load_clean_splits()
+
+    # Next: train the frozen tokenizer (vocab 2,000) on all cleaned train stories
+    # (decided 22 Oct; sweep evidence in vocab_sweep.py), then encode both splits
+    # into train.bin / val.bin
