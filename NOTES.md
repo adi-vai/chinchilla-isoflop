@@ -265,8 +265,7 @@ The "Feasibility study" section below remains the reference for inputs.
 - **Data artifacts (22 Oct).** `uv run python -m data.tinystories.prepare` writes
   `train.bin` / `val.bin` (`uint16` memmaps, gitignored, 894 MB / 11 MB) and
   `tokenizer.json` (committed — the frozen tokenizer; `<|endoftext|>` is id 0, ids
-  0–1999) into `data/tinystories/`. `prepare <n>` is a smoke test on n stories per
-  split, written to `data/tinystories/smoke/` so it can't overwrite the real files.
+  0–1999) into `data/tinystories/`.
   Checks passed: end-of-text count = story count in both splits; decoded validation
   text round-trips exactly. Byte-level pre-tokenizer adds a prefix space, so every
   story's first word is tokenized like a mid-text word (`Ġ`-prefixed) — consistent

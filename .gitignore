@@ -18,5 +18,3 @@ scratch/
 
 # Generated corpus data (reproduced by data/*/prepare.py)
 data/**/*.bin
-# Smoke-test outputs of data/*/prepare.py <n>
-data/**/smoke/
