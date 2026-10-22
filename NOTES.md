@@ -242,8 +242,8 @@ The "Feasibility study" section below remains the reference for inputs.
 
 ### Decided
 - **Corpus: TinyStories, provisional.** Single-epoch. With a 2K BPE tokenizer
-  Bryant & Liu use up to 5×10⁸ unique tokens → expect ~0.5B (count after the
-  tokenizer). That supports single-epoch bands with optima up to roughly 5–10M
+  Bryant & Liu use up to 5×10⁸ unique tokens; measured: **447M clean train tokens**
+  (open item 7). That supports single-epoch bands with optima up to roughly 5–10M
   params (smallest model needs D = C/(6·N_min) ≤ corpus).
 - **Tokenizer: byte-level BPE, vocab 2,000 (decided 22 Oct).** Configuration in
   `build_tokenizer()` (`data/tinystories/prepare.py`): byte-level pre-tokenizer, full
@@ -262,6 +262,15 @@ The "Feasibility study" section below remains the reference for inputs.
   better compression. 2K sits before that trade turns bad for the smallest models.
   Reminder: loss in nats/token is only comparable under this one tokenizer — convert
   to bits per character/byte for any cross-tokenizer comparison.
+- **Data artifacts (22 Oct).** `uv run python -m data.tinystories.prepare` writes
+  `train.bin` / `val.bin` (`uint16` memmaps, gitignored, 894 MB / 11 MB) and
+  `tokenizer.json` (committed — the frozen tokenizer; `<|endoftext|>` is id 0, ids
+  0–1999) into `data/tinystories/`. `prepare <n>` is a smoke test on n stories per
+  split, written to `data/tinystories/smoke/` so it can't overwrite the real files.
+  Checks passed: end-of-text count = story count in both splits; decoded validation
+  text round-trips exactly. Byte-level pre-tokenizer adds a prefix space, so every
+  story's first word is tokenized like a mid-text word (`Ġ`-prefixed) — consistent
+  across all data.
 - **Staged spend: £200 committed; up to ~£1k only after band 1 works.** Rule: stage 1
   is a *subset* of the full plan, never a separate mini-plan. Locked at band 1, so
   choose for the ceiling: corpus, tokenizer, depth/width rule, held-out eval set, LR
@@ -328,7 +337,9 @@ The "Feasibility study" section below remains the reference for inputs.
 4. **LR check plan:** which sizes, which LR values, how many steps; batch size.
 5. **Seeds:** which 2–3 sizes get a second seed for the location test.
 6. **Cost / wall-clock estimate** for LR check + pilot band.
-7. **Exact token count** (after the tokenizer) — replaces the ~0.5B estimate.
+7. ~~Exact token count~~ — **done 22 Oct: 447,014,068 train tokens** (1,792,648 clean
+   stories, 249.4 tokens/story incl. `<|endoftext|>`); validation 5,355,327 tokens
+   (21,990 stories). Two independent runs gave identical counts and tokenizer.
 8. **Near-duplicate contamination estimate (logged 21 Oct).** Exact sha256 matching
    only catches *verbatim* val→train leakage. TinyStories is synthetic and formulaic,
    so near-copies (a changed name, a reworded sentence) are likely, and near-duplicate
