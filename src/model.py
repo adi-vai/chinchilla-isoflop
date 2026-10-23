@@ -90,9 +90,16 @@ class TransformerLanguageModel(nn.Module):
         # residual stream, so this keeps its variance from growing with depth.
         _ = self.apply(self._init_weights)
         residual_std = 0.02 / math.sqrt(2 * config.model_depth)
+        residual_weights = ("attention_projection.weight", "ffwd_projection.weight")
+        num_scaled = 0
         for name, param in self.named_parameters():
-            if name.endswith("projection.weight"):
+            if name.endswith(residual_weights):  # endswith accepts a tuple: any match
                 _ = torch.nn.init.normal_(param, mean=0.0, std=residual_std)
+                num_scaled += 1
+        # Matching is by name, so a rename would silently skip layers: check the count
+        assert num_scaled == 2 * config.model_depth, (
+            f"scaled {num_scaled} residual projections, expected {2 * config.model_depth}"
+        )
 
     @staticmethod
     def _init_weights(module: nn.Module) -> None:
@@ -184,7 +191,7 @@ class TransformerBlock(nn.Module):
 
 class FeedForward(nn.Module):
     expand: nn.Linear
-    projection: nn.Linear
+    ffwd_projection: nn.Linear
     dropout: nn.Dropout
 
     def __init__(self, model_width: int, dropout_rate: float):
@@ -194,8 +201,7 @@ class FeedForward(nn.Module):
             model_width,
             4 * model_width,  # FLOPs[6n]: Linear(d, 4d), 4d² params
         )
-        # Named "projection" (as in attention) so the residual-projection init finds it
-        self.projection = nn.Linear(
+        self.ffwd_projection = nn.Linear(
             4 * model_width,
             model_width,  # FLOPs[6n]: Linear(4d, d), 4d² params
         )
@@ -203,7 +209,7 @@ class FeedForward(nn.Module):
 
     @override
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        return self.dropout(self.projection(F.relu(self.expand(inputs))))
+        return self.dropout(self.ffwd_projection(F.relu(self.expand(inputs))))
 
 
 class MultiHeadedSelfAttention(nn.Module):
@@ -212,7 +218,7 @@ class MultiHeadedSelfAttention(nn.Module):
     qkv: nn.Linear
     tril: torch.Tensor  # pyright: ignore[reportUninitializedInstanceVariable]  # set via register_buffer
     dropout: nn.Dropout
-    projection: nn.Linear
+    attention_projection: nn.Linear
 
     def __init__(
         self,
@@ -234,7 +240,7 @@ class MultiHeadedSelfAttention(nn.Module):
             "tril", torch.tril(torch.ones(context_length, context_length))
         )
         self.dropout = nn.Dropout(dropout_rate)
-        self.projection = nn.Linear(model_width, model_width)
+        self.attention_projection = nn.Linear(model_width, model_width)
 
     @override
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
@@ -307,7 +313,7 @@ class MultiHeadedSelfAttention(nn.Module):
         )
         # (B, H, T, T) @ (B, H, T, Q) = (B, H, T, Q) -> (B, T, H, Q)
         return self.dropout(  # residual dropout
-            self.projection(  # FLOPs[6n]: Linear(d, d), d² params
+            self.attention_projection(  # FLOPs[6n]: Linear(d, d), d² params
                 out.contiguous().view(
                     batch_length, sequence_length, model_width
                 )  # (B, T, d)

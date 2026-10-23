@@ -305,11 +305,12 @@ The "Feasibility study" section below remains the reference for inputs.
     token embedding (via `Linear`'s default init) started 14–38× smaller than the
     position embedding (N(0, 1)), with the ratio growing with `d` — an N-correlated
     difference in starting conditions. Now both start at std 0.02 at every width.
-  - Residual projections (`mh_sa.projection`, `ffwd.projection`) ~ N(0, 0.02/√(2L)),
-    per GPT-2, so the residual stream's variance doesn't grow with depth (relevant:
-    `L` varies across the ladder). Matched by name: both layers are called
-    `projection` (`FeedForward` was restructured from an `nn.Sequential` to named
-    layers for this; verified to compute the identical function). **To revisit:**
+  - Residual projections (`mh_sa.attention_projection`, `ffwd.ffwd_projection`) ~
+    N(0, 0.02/√(2L)), per GPT-2, so the residual stream's variance doesn't grow with
+    depth (relevant: `L` varies across the ladder). Matched by name, listing both
+    explicitly, with an assert that exactly `2L` layers were scaled — name matching
+    silently skipped the feedforward layer once (`FeedForward` was restructured from
+    an `nn.Sequential` to named layers; verified identical function). **To revisit:**
     the derivation of the `1/√(2L)` factor — copied from nanoGPT, not yet worked
     through.
   - Checks: initial loss on random targets 7.61–7.69 vs `ln 2000 = 7.60`; both
