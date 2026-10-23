@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import urllib.request
 from collections.abc import Callable
@@ -76,7 +77,31 @@ class TransformerLanguageModel(nn.Module):
             ]
         )
         self.final_layer_norm = nn.LayerNorm(config.model_width)
-        self.lm_head = nn.Linear(config.model_width, config.vocab_size)
+        self.lm_head = nn.Linear(
+            config.model_width, config.vocab_size, bias=False
+        )  # following GPT-2, nanoGPT, and Bryant & Liu
+        # Weight tying: one (V, d) matrix is both the token lookup and the output layer
+        self.token_embedding_table.weight = self.lm_head.weight
+
+        # Initialisation (following nanoGPT): every Linear and Embedding weight
+        # ~ N(0, 0.02), biases zero, so both embeddings start at the same scale at
+        # every width. Then the residual projections (attention output, feedforward
+        # output) get std 0.02/sqrt(2L), per GPT-2: each block adds two of them to the
+        # residual stream, so this keeps its variance from growing with depth.
+        _ = self.apply(self._init_weights)
+        residual_std = 0.02 / math.sqrt(2 * config.model_depth)
+        for name, param in self.named_parameters():
+            if name.endswith("projection.weight"):
+                _ = torch.nn.init.normal_(param, mean=0.0, std=residual_std)
+
+    @staticmethod
+    def _init_weights(module: nn.Module) -> None:
+        if isinstance(module, nn.Linear):
+            _ = torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:  # pyright: ignore[reportUnnecessaryComparison]  # None when bias=False (lm_head)
+                _ = torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            _ = torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     @override
     def forward(
@@ -120,8 +145,6 @@ class TransformerLanguageModel(nn.Module):
 
     def get_compute_params(self) -> int:
         compute_params = self.get_total_params()
-        # Lookup only, no matmul (unlike in nanoGPT where same weights are used for lm_head's matmul)
-        compute_params -= self.token_embedding_table.weight.numel()
         # Lookup only, no matmul
         compute_params -= self.position_embedding_table.weight.numel()
         return compute_params
@@ -160,26 +183,27 @@ class TransformerBlock(nn.Module):
 
 
 class FeedForward(nn.Module):
-    net: nn.Sequential
+    expand: nn.Linear
+    projection: nn.Linear
+    dropout: nn.Dropout
 
     def __init__(self, model_width: int, dropout_rate: float):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(
-                model_width,
-                4 * model_width,  # FLOPs[6n]: Linear(d, 4d), 4d² params
-            ),  # 4x is the heuristic from Attention paper
-            nn.ReLU(),
-            nn.Linear(
-                4 * model_width,
-                model_width,  # FLOPs[6n]: Linear(4d, d), 4d² params
-            ),  # projection to get output
-            nn.Dropout(dropout_rate),
+        # 4x expansion is the heuristic from the Attention paper
+        self.expand = nn.Linear(
+            model_width,
+            4 * model_width,  # FLOPs[6n]: Linear(d, 4d), 4d² params
         )
+        # Named "projection" (as in attention) so the residual-projection init finds it
+        self.projection = nn.Linear(
+            4 * model_width,
+            model_width,  # FLOPs[6n]: Linear(4d, d), 4d² params
+        )
+        self.dropout = nn.Dropout(dropout_rate)
 
     @override
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        return self.net(inputs)
+        return self.dropout(self.projection(F.relu(self.expand(inputs))))
 
 
 class MultiHeadedSelfAttention(nn.Module):

@@ -177,10 +177,11 @@ inform the harness.
 
 **Two parameter counts, both on the model and both logged per run.**
 - `get_total_params()`: every parameter.
-- `get_compute_params()`: total minus the token and position embedding tables.
-  This is the `N` in `6N`. Embedding lookups do no matmul work; `lm_head` does and
-  is counted. (nanoGPT counts its token embedding because it is weight-tied to
-  `lm_head`; this model doesn't tie weights, so both tables are excluded.)
+- `get_compute_params()`: total minus the **position** embedding table. This is
+  the `N` in `6N`. *Revised 23 Oct with weight tying:* the token embedding and
+  `lm_head` are one `(V, d)` matrix — a free lookup on input, a real matmul on
+  output — so it is counted (once, as compute). `nn.Module.parameters()` yields a
+  shared parameter once, so `get_total_params()` needs no special case.
 
 Which count goes on the IsoFLOP plot's N axis is decided at plotting time —
 both are logged, so nothing needs rerunning. Relevant: Kaplan et al. counted
@@ -295,6 +296,28 @@ The "Feasibility study" section below remains the reference for inputs.
   bias `6ND` would introduce; the exact `flops_per_token` (6N + 12·L·T·d) accounts
   for it, which is why exact FLOPs is non-negotiable here. The position embedding is
   `256·d` params (in `N_total`, not in `N_compute`).
+- **Weight tying, no `lm_head` bias, nanoGPT initialisation (decided 23 Oct).**
+  - Token embedding and `lm_head` share one `(V, d)` matrix, as in GPT-2, nanoGPT and
+    Bryant & Liu. Untied, the input table is `V·d` params that do no compute — at
+    `d = 64` that's 128K on a ~330K model (~40% of total N), inflating total N most
+    at the small end of the ladder.
+  - All `Linear`/`Embedding` weights ~ N(0, 0.02), biases zero. Without this, the
+    token embedding (via `Linear`'s default init) started 14–38× smaller than the
+    position embedding (N(0, 1)), with the ratio growing with `d` — an N-correlated
+    difference in starting conditions. Now both start at std 0.02 at every width.
+  - Residual projections (`mh_sa.projection`, `ffwd.projection`) ~ N(0, 0.02/√(2L)),
+    per GPT-2, so the residual stream's variance doesn't grow with depth (relevant:
+    `L` varies across the ladder). Matched by name: both layers are called
+    `projection` (`FeedForward` was restructured from an `nn.Sequential` to named
+    layers for this; verified to compute the identical function). **To revisit:**
+    the derivation of the `1/√(2L)` factor — copied from nanoGPT, not yet worked
+    through.
+  - Checks: initial loss on random targets 7.61–7.69 vs `ln 2000 = 7.60`; both
+    embeddings std 0.020; residual projections std 0.0071 at `L = 4`.
+  - **Calibration:** with tying, total N matches Bryant & Liu exactly for all five
+    configs (343,680 / 1,080,576 / 3,099,264 / 10,578,560 / 28,779,840 vs
+    344K / 1.1M / 3.1M / 10.6M / 28.8M). Their N = total params of a tied model with
+    no `lm_head` bias; ours is now the same model.
 - **Staged spend: £200 committed; up to ~£1k only after band 1 works.** Rule: stage 1
   is a *subset* of the full plan, never a separate mini-plan. Locked at band 1, so
   choose for the ceiling: corpus, tokenizer, depth/width rule, held-out eval set, LR
@@ -354,8 +377,18 @@ The "Feasibility study" section below remains the reference for inputs.
   500 on the 30M runs) — the honesty standard for this write-up.
 
 ### Open — to settle before the pilot runs
-1. **N ladder:** 6–7 (L, d) pairs spanning ~1–30M; depth/width rule; compare with
-   B&L's ladder. N ≈ 12·L·d² + 2000·d (plus output layer if untied).
+1. **N ladder (in progress, `src/ladder.py`):** 6–7 geometrically spaced `(L, d)`
+   pairs and a depth/width rule. *23 Oct:* counting calibrated — total N reproduces
+   all five Bryant & Liu configs to their published precision (see Decided).
+   Target range from the Chinchilla heuristic (`D = 20N`, `C = 120·N_opt²`, 10×
+   spread centred in log N, smallest run's `D = 20√10·N_opt ≤ 447M`):
+   **N_opt ≈ 7.1M** (≈ 6.4M with a 90% token margin), so the grid spans ≈ 2–22M.
+   Assumption to revisit: the 20 tok/param rule uses Chinchilla's N (incl.
+   embeddings) while `C = 6ND` uses compute N; at ~2M params they differ by the
+   embedding share — covered by the margin and spread, but noted. Next: write the
+   permanent `flops_per_token`, redo the smallest run's `D` exactly, choose the
+   shape rule (inspect B&L's `d/L` and head size), fill the ladder.
+   N_compute ≈ 12·L·d² + V·d (tied `lm_head`); N_total adds `256·d`.
 2. ~~Context T~~ — **decided 23 Oct: fixed T = 256** (see Decided).
 3. **Band compute C:** highest single-epoch C given the token count and N_min.
 4. **LR check plan:** which sizes, which LR values, how many steps; batch size.
