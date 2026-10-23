@@ -2,7 +2,7 @@
 
 Durable project state: what's decided, what's open, what's next. Complements
 `CLAUDE.md` (which holds the invariants and the phase plan) — this file tracks
-the moving parts. Last updated 2026-10-22.
+the moving parts. Last updated 2026-10-23.
 
 ## Glossary
 
@@ -282,6 +282,19 @@ The "Feasibility study" section below remains the reference for inputs.
   text round-trips exactly. Byte-level pre-tokenizer adds a prefix space, so every
   story's first word is tokenized like a mid-text word (`Ġ`-prefixed) — consistent
   across all data.
+- **Context length T = 256, fixed for every run (decided 23 Oct).** Reasons:
+  - Loss at different `T` is a different task — a longer context makes the next
+    token easier to predict — so scaling `T` with `d` would mix model size with task
+    difficulty along exactly the axis being fitted. Fixed `T` keeps one task.
+  - The mean cleaned story is ~249 tokens (incl. `<|endoftext|>`), so a 256-token
+    window holds roughly one story.
+  - Matches Bryant & Liu's default.
+
+  Consequence: the attention share of compute, `T/(6d)`, varies across the ladder —
+  67% of `6N` at `d = 64`, 33% at 128, 22% at 192, 13% at 320, 9% at 480. That's the
+  bias `6ND` would introduce; the exact `flops_per_token` (6N + 12·L·T·d) accounts
+  for it, which is why exact FLOPs is non-negotiable here. The position embedding is
+  `256·d` params (in `N_total`, not in `N_compute`).
 - **Staged spend: £200 committed; up to ~£1k only after band 1 works.** Rule: stage 1
   is a *subset* of the full plan, never a separate mini-plan. Locked at band 1, so
   choose for the ceiling: corpus, tokenizer, depth/width rule, held-out eval set, LR
@@ -343,7 +356,7 @@ The "Feasibility study" section below remains the reference for inputs.
 ### Open — to settle before the pilot runs
 1. **N ladder:** 6–7 (L, d) pairs spanning ~1–30M; depth/width rule; compare with
    B&L's ladder. N ≈ 12·L·d² + 2000·d (plus output layer if untied).
-2. **Context T:** fixed 256 (as B&L) or scaled with d (holding T/(6d) fixed)?
+2. ~~Context T~~ — **decided 23 Oct: fixed T = 256** (see Decided).
 3. **Band compute C:** highest single-epoch C given the token count and N_min.
 4. **LR check plan:** which sizes, which LR values, how many steps; batch size.
 5. **Seeds:** which 2–3 sizes get a second seed for the location test.
@@ -392,7 +405,7 @@ D_max = C_max / flops_per_token(N_min at C_max)  ≤  training-split tokens
 3. `N` spread at each `C` — wide enough for a clear U on both sides of the
    optimum (typically ~10× smallest to largest).
 4. Architecture per `N` — how `model_depth` and `model_width` move together, and
-   whether `T` is fixed or scaled with `d` (holding the `T/(6d)` ratio fixed).
+   whether `T` is fixed or scaled with `d` — *decided 23 Oct: fixed at 256*.
 5. `flops_per_token` per config — formula and parameter counts are in place.
    Validate against nanoGPT's `scaling_laws.ipynb` (reading item 4).
 6. **Peak LR (and batch size) as a function of `N` — currently undecided.** Only
