@@ -54,6 +54,12 @@ Easy confusions:
 
 ## Where things stand
 
+**Handoff, end of 25 Oct.** N ladder decided (Q=32, d/L=32, 7 rungs 2.2M–22.1M; see
+Decided). Analytic counts and `flops_per_token` (matmul FLOPs only) in
+`src/util.py`, tested in `tests/` (`uv run pytest`). Provisional band-1
+C = 6.41e15. **Next:** open items 3–4 together — margin, batch size, per-run D and
+iterations, LR check plan — then 5–6, then the harness.
+
 **Handoff, end of 22 Oct.** Data is ready: `data/tinystories/` holds the cleaned,
 tokenized TinyStories (`train.bin` 447,014,068 tokens, `val.bin` 5,355,327, frozen
 2K byte-level BPE `tokenizer.json`), reproducible via
@@ -325,6 +331,33 @@ The "Feasibility study" section below remains the reference for inputs.
     configs (343,680 / 1,080,576 / 3,099,264 / 10,578,560 / 28,779,840 vs
     344K / 1.1M / 3.1M / 10.6M / 28.8M). Their N = total params of a tied model with
     no `lm_head` bias; ours is now the same model.
+- **N ladder: Q=32, d/L=32, 7 rungs (decided 25 Oct; `src/ladder.py`).**
+  Method: 7 targets geometric over 10× in *total* N (Chinchilla's convention),
+  centred on N_opt = 7.1M. A shape rule (head size Q, target d/L, tolerance ×/÷1.2,
+  L ≥ 4, H 4–12) is fixed for the whole ladder so shape doesn't drift between rungs
+  and confound N; each rung takes the candidate closest in log N; rules ranked by
+  worst rung (RMS logged too). Searched Q ∈ {32, 64} × d/L ∈ {20, 32, 64, 128, 200}.
+
+  |   d |  L |  H |  d/L |    total N |  miss |
+  |----:|---:|---:|-----:|-----------:|------:|
+  | 160 |  6 |  5 | 26.7 |  2,214,080 | −1.4% |
+  | 192 |  6 |  6 | 32.0 |  3,099,264 | −6.0% |
+  | 224 |  7 |  7 | 32.0 |  4,736,256 | −2.1% |
+  | 256 |  8 |  8 | 32.0 |  6,889,984 | −3.0% |
+  | 288 | 10 |  9 | 28.8 | 10,632,384 | +2.0% |
+  | 320 | 12 | 10 | 26.7 | 15,506,560 | +1.4% |
+  | 384 | 12 | 12 | 32.0 | 22,146,816 | −1.4% |
+
+  Why this rule: realised d/L 26.7–32, the most consistent shape and well inside
+  Kaplan's flat band; worst miss 6.3%; spread 10.0×; rung 2 is exactly B&L's 3.1M
+  config. The only other feasible rule, d/L=20, sits at or below the band edge on
+  most rungs (17.8–22.9). **Finding for the write-up:** at 2–22M only Q=32 with
+  d/L ≈ 20–32 is feasible — Q=64 needs d ≥ 256, so with L ≥ 4 the smallest model is
+  already ~3.7M; high d/L needs d ≥ 4r (d/L=128 → N ≥ ~12.6M). Consistent with B&L's
+  16–48. **Coupling check:** C from the bottom rung (item 3) gives heuristic
+  √(C/120) = 7.31M, +6.1% vs the middle rung; criterion is within half a rung
+  (±21%), and the 20 tok/param heuristic is itself uncertain by far more (≈25 in
+  Besiroglu et al. 2024; untested on TinyStories), which the 10× spread covers.
 - **Staged spend: £200 committed; up to ~£1k only after band 1 works.** Rule: stage 1
   is a *subset* of the full plan, never a separate mini-plan. Locked at band 1, so
   choose for the ceiling: corpus, tokenizer, depth/width rule, held-out eval set, LR
@@ -384,42 +417,13 @@ The "Feasibility study" section below remains the reference for inputs.
   500 on the 30M runs) — the honesty standard for this write-up.
 
 ### Open — to settle before the pilot runs
-1. **N ladder (in progress, `src/ladder.py`):** 6–7 geometrically spaced `(L, d)`
-   pairs and a depth/width rule. *23 Oct:* counting calibrated — total N reproduces
-   all five Bryant & Liu configs to their published precision (see Decided).
-   Target range from the Chinchilla heuristic (`D = 20N`, `C = 120·N_opt²`, 10×
-   spread centred in log N, smallest run's `D = 20√10·N_opt ≤ 447M`):
-   **N_opt ≈ 7.1M** (≈ 6.4M with a 90% token margin), so the grid spans ≈ 2–22M.
-   Assumption to revisit: the 20 tok/param rule uses Chinchilla's N (incl.
-   embeddings) while `C = 6ND` uses compute N; at ~2M params they differ by the
-   embedding share — covered by the margin and spread, but noted.
-   *25 Oct:* `src/util.py` has the analytic counts (`matmul_params`,
-   `compute_params = matmul + (10L + 2)·d`, `total_params = compute + T·d`) and
-   `flops_per_token` (matmul convention, see "Compute exact FLOPs"); `tests/`
-   (`uv run pytest`) checks them against the model and B&L. Next: choose the shape
-   rule (inspect B&L's `d/L` and head size), fill the ladder, then derive `C` from
-   the smallest *actual* config: `C = margin · 447M · flops_per_token(config_min)`;
-   every other run's `D = C / flops_per_token(config)`. The heuristic only centres
-   the grid.
-   *Shape rule — framing for 26 Oct (target: ladder finalised):* loss depends weakly
-   on shape (Kaplan 2020 §3.1, Fig. 5: d/L ≈ 20–200 within a few %), so shape is
-   the lever for hitting target N, kept consistent across the ladder so it doesn't
-   confound N. Reduce three knobs to one: pick a head-size rule (fixed Q → H = d/Q)
-   and an aspect-ratio rule (L = d/r or a mild trend), then N is a function of d
-   alone; solve for d per target N, round, read off N, L, H, `flops_per_token`.
-   B&L for reference: L 4,4,6,8,10; H 4,4,6,8,8; d/L 16,32,32,40,48; Q
-   16,32,32,40,60 (Q grows; H doesn't change N or FLOPs at fixed d — tested).
-   Constraints:
-   - Q: H must divide d (hard). Multiple of 8 for tensor-core / fused-attention
-     efficiency (soft; not power-of-2 — B&L's 60 runs fine). 64 is standard; small
-     Q caps each head's score-matrix rank at Q; large Q at small d leaves 1–4 heads.
-   - d/L: L ≥ 2 (induction heads need two layers). Stay in Kaplan's flat band.
-     Integer L is coarse at small N (L 2→3 is 1.5×, about a whole 1.47× rung of a
-     7-point 10× grid), so fine steps come from d.
-   - d·V is a large share of N at the bottom (128K of 327K at d=64), so shape moves
-     N less there than 12·L·d² suggests. Attention share T/(6d) is largest there.
+1. ~~N ladder~~ — **decided 25 Oct: Q=32, d/L=32, 7 rungs 2.2M–22.1M** (see Decided).
 2. ~~Context T~~ — **decided 23 Oct: fixed T = 256** (see Decided).
 3. **Band compute C:** highest single-epoch C given the token count and N_min.
+   *25 Oct, provisional:* from the ladder's bottom rung (160, 6, 5),
+   `C = 0.9 · 447,014,068 · flops_per_token = 6.41e15` (`coupling_check` in
+   `src/ladder.py`). Still to settle: the margin, then per-run D and iterations,
+   which need the batch size (item 4).
 4. **LR check plan:** which sizes, which LR values, how many steps; batch size.
 5. **Seeds:** which 2–3 sizes get a second seed for the location test.
 6. **Cost / wall-clock estimate** for LR check + pilot band.
