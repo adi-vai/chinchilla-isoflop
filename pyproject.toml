@@ -23,3 +23,12 @@ reportUnknownArgumentType = false
 reportUnknownParameterType = false
 reportUnknownLambdaType = false
 reportConstantRedefinition = false
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]  # so tests can `import src...` from the repo root
+testpaths = ["tests"]

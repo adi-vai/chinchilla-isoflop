@@ -11,6 +11,7 @@ Run from the repo root: `uv run python -m src.ladder`.
 import logging
 
 from src.model import ModelConfig, TransformerLanguageModel
+from src.util import compute_params, total_params
 
 logger = logging.getLogger(__name__)
 
@@ -63,8 +64,34 @@ def calibrate_against_bryant_liu() -> None:
         )
 
 
+def check_analytic_param_count() -> None:
+    for model_width, model_depth, num_heads, _, _ in BRYANT_LIU:
+        model_config = make_config(model_width, model_depth, num_heads)
+        model = TransformerLanguageModel(model_config)
+        compute, total = compute_params(model_config), total_params(model_config)
+        assert compute == model.get_compute_params(), (
+            f"analytic compute N {compute:,} != model's {model.get_compute_params():,}"
+        )
+        assert total == model.get_total_params(), (
+            f"analytic total N {total:,} != model's {model.get_total_params():,}"
+        )
+        logger.info(
+            f"d={model_width} L={model_depth} H={num_heads}: compute N {compute:,}, total N {total:,} match the model"
+        )
+
+
+def print_aspect_ratios():
+    for model_width, model_depth, num_heads, published, sig_figs in BRYANT_LIU:
+        logger.info(f"Aspect ratio is {model_width / model_depth}")
+
+
 def main() -> None:
+    logger.info("Calibrating against Bryant & Liu")
     calibrate_against_bryant_liu()
+    logger.info("Checking analytic parameter counts against the model")
+    check_analytic_param_count()
+    logger.info("Print aspect ratios")
+    print_aspect_ratios()
 
 
 if __name__ == "__main__":

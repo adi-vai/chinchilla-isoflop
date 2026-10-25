@@ -120,6 +120,12 @@ flops_per_token = 6·N + 12·L·H·Q·T
 ```
 
 - `6N`: every parameter costs 2 FLOPs forward (multiply + add) and 4 backward.
+  *Decided 25 Oct:* `C` counts **matmul FLOPs only**, so the `N` here is the matmul
+  weights, `12·L·d² + d·V` (`matmul_params` in `src/util.py`). The `(10L + 2)·d`
+  biases and LayerNorm vectors are elementwise (~2 FLOPs/param/token, not 6), as are
+  softmax, ReLU, residual adds and the normalisation itself; all are left out. This
+  is the Kaplan / PaLM / nanoGPT `estimate_mfu` convention, so our `C` means what
+  theirs does. Size of the omission: 0.8% of N at d=64, 0.2% at d=480.
 - `12·L·H·Q·T`: the attention matmuls `QKᵀ` and `attn @ V`, which have no
   parameters, so `6N` cannot see them. Per head per layer, each costs `2·T²·Q`
   for a whole sequence; × H × L, ÷ T to get per token, × 3 for forward+backward.
@@ -386,10 +392,32 @@ The "Feasibility study" section below remains the reference for inputs.
    **N_opt ≈ 7.1M** (≈ 6.4M with a 90% token margin), so the grid spans ≈ 2–22M.
    Assumption to revisit: the 20 tok/param rule uses Chinchilla's N (incl.
    embeddings) while `C = 6ND` uses compute N; at ~2M params they differ by the
-   embedding share — covered by the margin and spread, but noted. Next: write the
-   permanent `flops_per_token`, redo the smallest run's `D` exactly, choose the
-   shape rule (inspect B&L's `d/L` and head size), fill the ladder.
-   N_compute ≈ 12·L·d² + V·d (tied `lm_head`); N_total adds `256·d`.
+   embedding share — covered by the margin and spread, but noted.
+   *25 Oct:* `src/util.py` has the analytic counts (`matmul_params`,
+   `compute_params = matmul + (10L + 2)·d`, `total_params = compute + T·d`) and
+   `flops_per_token` (matmul convention, see "Compute exact FLOPs"); `tests/`
+   (`uv run pytest`) checks them against the model and B&L. Next: choose the shape
+   rule (inspect B&L's `d/L` and head size), fill the ladder, then derive `C` from
+   the smallest *actual* config: `C = margin · 447M · flops_per_token(config_min)`;
+   every other run's `D = C / flops_per_token(config)`. The heuristic only centres
+   the grid.
+   *Shape rule — framing for 26 Oct (target: ladder finalised):* loss depends weakly
+   on shape (Kaplan 2020 §3.1, Fig. 5: d/L ≈ 20–200 within a few %), so shape is
+   the lever for hitting target N, kept consistent across the ladder so it doesn't
+   confound N. Reduce three knobs to one: pick a head-size rule (fixed Q → H = d/Q)
+   and an aspect-ratio rule (L = d/r or a mild trend), then N is a function of d
+   alone; solve for d per target N, round, read off N, L, H, `flops_per_token`.
+   B&L for reference: L 4,4,6,8,10; H 4,4,6,8,8; d/L 16,32,32,40,48; Q
+   16,32,32,40,60 (Q grows; H doesn't change N or FLOPs at fixed d — tested).
+   Constraints:
+   - Q: H must divide d (hard). Multiple of 8 for tensor-core / fused-attention
+     efficiency (soft; not power-of-2 — B&L's 60 runs fine). 64 is standard; small
+     Q caps each head's score-matrix rank at Q; large Q at small d leaves 1–4 heads.
+   - d/L: L ≥ 2 (induction heads need two layers). Stay in Kaplan's flat band.
+     Integer L is coarse at small N (L 2→3 is 1.5×, about a whole 1.47× rung of a
+     7-point 10× grid), so fine steps come from d.
+   - d·V is a large share of N at the bottom (128K of 327K at d=64), so shape moves
+     N less there than 12·L·d² suggests. Attention share T/(6d) is largest there.
 2. ~~Context T~~ — **decided 23 Oct: fixed T = 256** (see Decided).
 3. **Band compute C:** highest single-epoch C given the token count and N_min.
 4. **LR check plan:** which sizes, which LR values, how many steps; batch size.
