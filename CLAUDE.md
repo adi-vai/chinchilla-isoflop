@@ -24,6 +24,7 @@ deep learning through this build — see "How to work with me" below.
 - Approach 3 (parametric fit L = E + A/N^α + B/D^β) is FRAGILE and is a STRETCH GOAL
   only, gated on a post-IsoFLOP budget checkpoint. Do not build it early.
 - Read losses as "distance to the entropy floor E", not "distance to 0".
+- Quality hours > total hours. Stretch goals (Approach 3, multi-GPU) are cut-material at the post-IsoFLOP checkpoint.
 
 ## Stack & conventions
 - Python + PyTorch, managed with uv (pyproject.toml + uv.lock; .venv/ created and
@@ -57,13 +58,3 @@ deep learning through this build — see "How to work with me" below.
 - If I'm scope-creeping (e.g. reaching for Approach 3 or a distributed run before the
   core exists), flag it.
 - When you correct a recurring mistake, add a line to this file so it doesn't repeat.
-
-## Timeline
-Quality hours > total hours. Stretch goals (Approach 3, multi-GPU) are cut-material at the post-IsoFLOP checkpoint.
-
----
-<!-- NOTE (personal scaffolding — review before making repo public):
-The "How to work with me" and "Timeline" sections are for the private build phase.
-Before flipping public, decide what stays: the project/facts/conventions sections are
-genuinely useful repo docs; the personal coaching + timeline notes probably move out
-(into a private note) or get trimmed. JIT this at the go-public step, not before. -->
