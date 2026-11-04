@@ -164,5 +164,7 @@ NOTES.md     decisions, measurements, open questions
 - Bryant & Liu (2026). *Practical Scaling Laws: Converting Compute into Performance
   in a Data-Constrained World.* arXiv:2605.09189.
 - Eldan & Li (2023). *TinyStories: How Small Can Language Models Be and Still
-  Speak Coherent English?*
+  Speak Coherent English?* Dataset:
+  [roneneldan/TinyStories](https://huggingface.co/datasets/roneneldan/TinyStories),
+  CDLA-Sharing-1.0; the committed `tokenizer.json` is trained on it.
 - Karpathy, [nanoGPT](https://github.com/karpathy/nanoGPT).
