@@ -2,13 +2,15 @@
 
 ## What this project is
 A from-scratch replication of the Chinchilla compute-optimal scaling result
-(Hoffmann et al. 2022) using the IsoFLOP method (their Approach 2), plus an
-extension probing inference-aware over-training (how the compute-optimal model
-size shifts LEFT / smaller once an inference-cost term enters the objective).
+(Hoffmann et al. 2022) using the IsoFLOP method (their Approach 2), plus a
+planned extension (gated on the core sweep; see README) probing inference-aware
+over-training (how the compute-optimal model size shifts LEFT / smaller once an
+inference-cost term enters the objective).
 
 Goal: train a family of small transformers across compute budgets, fit the
 IsoFLOP frontier (N_opt ∝ C^a, D_opt ∝ C^b, targets a≈b≈0.5, ~20 tok/param),
-then show the cost-optimal model size migrates into the over-trained region.
+then (planned extension) show the cost-optimal model size migrates into the
+over-trained region.
 
 This is a portfolio + learning project. The author is deliberately learning
 deep learning through this build — see "How to work with me" below.
