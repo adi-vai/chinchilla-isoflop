@@ -376,9 +376,9 @@ The "Feasibility study" section below remains the reference for inputs.
   can flatten the U and get blamed on the corpus (Porian et al.).
 - **Pass/fail criterion (pre-registered — write numbers before any run):**
   - Approach 2 per band: fit a **parabola in log N**; the vertex is the optimum.
-  - *Shape:* edge points ≥ X% above the minimum loss (working X = 3–5%; this project's
-    threshold, **not** a Chinchilla criterion — Chinchilla sets no such number, and
-    depth mostly reflects how wide the N span is).
+  - *Shape:* edge points ≥ **5%** above the minimum loss (fixed 4 Nov, before any
+    run). This project's threshold, **not** a Chinchilla criterion — Chinchilla sets no
+    such number, and depth mostly reflects how wide the N span is (10× here).
   - *Location:* vertex **inside** the swept range, and its uncertainty small — e.g.
     a second seed at 2–3 sizes or a bootstrap over points moves the vertex by
     < ~1.5× in N.
