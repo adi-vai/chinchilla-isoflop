@@ -75,13 +75,13 @@ Phases 1–2 done (`learning/`). Phase 3 (harness) in progress.
 
 `src/model.py` exists: a port of `learning/better_bigram.py` with full type
 annotations and batched attention. History:
-- `59be118` — annotated, shapes relabelled, behaviour unchanged. **Reference
+- `0d62de7` — annotated, shapes relabelled, behaviour unchanged. **Reference
   version for the equivalence test.**
-- `0d5e5f7` — q/k/v fused into one projection within each head.
-- `5886224` — q/k/v fused across heads: one `Linear(d, 3d)` in
+- `c718983` — q/k/v fused into one projection within each head.
+- `36ec20d` — q/k/v fused across heads: one `Linear(d, 3d)` in
   `MultiHeadedSelfAttention`, reshaped to `(B, H, T, Q)`; `SelfAttentionHead`
-  removed. **Verified equivalent** to `59be118` (see Equivalence test below).
-- `24afd11` — attention scaling fixed to `head_size**-0.5`.
+  removed. **Verified equivalent** to `0d62de7` (see Equivalence test below).
+- `60bf318` — attention scaling fixed to `head_size**-0.5`.
 
 The model and training loop are still in one file; the split into
 `src/model.py` and `src/train.py` comes with the harness.
@@ -219,7 +219,7 @@ class-level declaration plus a targeted
 
 **Attention logits are scaled by `embedding_dimension**-0.5` instead of
 `head_size**-0.5`** — in `learning/better_bigram.py` (left there on purpose).
-Fixed in `src/model.py` in `24afd11`, after the equivalence test passed.
+Fixed in `src/model.py` in `60bf318`, after the equivalence test passed.
 
 Why it's wrong: the scaling fixes the variance of a dot product. A score is
 `Σ qᵢkᵢ` over `head_size` terms; with unit-variance components its variance is
@@ -233,17 +233,17 @@ compensates by learning larger `W_q`, `W_k`, which is why it still trains.
 
 ## Equivalence test (done)
 
-**Result:** the batched attention in `5886224` matches the per-head version in
-`59be118` — max |difference| 1.3e-07 at `T=8` and 1.8e-07 at `T=5`
+**Result:** the batched attention in `36ec20d` matches the per-head version in
+`0d62de7` — max |difference| 1.3e-07 at `T=8` and 1.8e-07 at `T=5`
 (`T < context_length`, exercising the mask slice), well inside `atol=1e-6`.
 Deliberately broken copies fail: q/v blocks swapped (diff 1.3), q/k swapped
-(0.08), one head's rows misplaced (0.12). After the scaling fix (`24afd11`) the
+(0.08), one head's rows misplaced (0.12). After the scaling fix (`60bf318`) the
 outputs differ by ~1e-01, as intended.
 
 Throwaway script in `scratch/` (gitignored), not committed (it needs the old code).
 Steps, for reference:
 
-1. `git show 59be118:src/model.py > scratch/model_per_head.py`.
+1. `git show 0d62de7:src/model.py > scratch/model_per_head.py`.
 2. Import both; seed *after* the imports (importing `src.model` reseeds the RNG).
 3. Build old and new `MultiHeadedSelfAttention` with distinct small sizes
    (e.g. `d=32, H=4, Q=8, T=8`); `.eval()` both so dropout is off.
