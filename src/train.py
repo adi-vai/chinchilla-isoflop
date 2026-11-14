@@ -1,0 +1,205 @@
+"""Train one IsoFLOP run (NOTES.md: optimizer, data order, eval, accumulation).
+
+Run from the repo root:
+    uv run python -m src.train --rung 160 6 5 --peak-lr 6e-4 --seed 0
+
+--max-steps makes the run a rehearsal (pipeline check, not a sweep point): the
+schedule is built for that length, and --rehearsal-tokens-per-step may shrink the
+step. Rehearsals are marked as such in the logs and the results CSV.
+"""
+
+import argparse
+import contextlib
+import logging
+import math
+from dataclasses import dataclass
+
+import torch
+
+from src.data import DATA_SEED, TrainBatches
+from src.ladder import CONTEXT_LENGTH, make_config
+from src.model import ModelConfig, TransformerLanguageModel
+from src.run_plan import (
+    EXPECTED_RUNGS,
+    TOKENS_PER_STEP,
+    RunPlan,
+    band_compute_budget,
+    plan_run,
+)
+from src.util import flops_per_token
+
+logger = logging.getLogger(__name__)
+
+# Optimizer (NOTES.md, decided 14 Nov)
+BETAS = (0.9, 0.95)
+EPS = 1e-8
+WEIGHT_DECAY = 0.1
+GRAD_CLIP = 1.0
+MIN_LR_RATIO = 0.1  # min_lr = peak / 10
+
+
+@dataclass(frozen=True)
+class RunSetup:
+    config: ModelConfig
+    plan: RunPlan
+    rehearsal: bool
+    tokens_per_step: int
+    micro_batch_size: int
+    accum_steps: int
+    device: torch.device
+    autocast_dtype: torch.dtype | None  # None = plain fp32
+    peak_lr: float
+    min_lr: float
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    _ = parser.add_argument(
+        "--rung", type=int, nargs=3, required=True, metavar=("D", "L", "H")
+    )
+    _ = parser.add_argument("--peak-lr", type=float, required=True)
+    _ = parser.add_argument(
+        "--seed", type=int, required=True, help="model initialisation"
+    )
+    _ = parser.add_argument(
+        "--data-seed",
+        type=int,
+        default=DATA_SEED,
+        help="data order; the same for every rung",
+    )
+    _ = parser.add_argument(
+        "--micro-batch", type=int, default=64, help="sequences per forward pass"
+    )
+    _ = parser.add_argument(
+        "--device",
+        choices=("cuda", "mps", "cpu"),
+        help="default: cuda, else mps, else cpu",
+    )
+    _ = parser.add_argument(
+        "--max-steps", type=int, help="rehearsal: override the planned step count"
+    )
+    _ = parser.add_argument(
+        "--rehearsal-tokens-per-step",
+        type=int,
+        help=f"rehearsal only: tokens per step instead of {TOKENS_PER_STEP:,}",
+    )
+    return parser.parse_args()
+
+
+def pick_device(requested: str | None) -> torch.device:
+    if requested is not None:
+        return torch.device(requested)
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+def accumulation_steps(tokens_per_step: int, micro_batch_size: int) -> int:
+    tokens_per_micro_batch = micro_batch_size * CONTEXT_LENGTH
+    if tokens_per_step % tokens_per_micro_batch != 0:
+        raise ValueError(
+            f"micro-batch {micro_batch_size} x T {CONTEXT_LENGTH} doesn't divide "
+            + f"{tokens_per_step:,} tokens per step"
+        )
+    return tokens_per_step // tokens_per_micro_batch
+
+
+def rehearsal_plan(config: ModelConfig, steps: int, tokens_per_step: int) -> RunPlan:
+    # Rehearsals only: plan_run's arithmetic at a forced length, warmup 5% with no
+    # floor (the floor would exceed a short run). Real runs never come here.
+    realized_tokens = steps * tokens_per_step
+    return RunPlan(
+        target_tokens=realized_tokens,
+        steps=steps,
+        realized_tokens=realized_tokens,
+        realized_compute=realized_tokens * flops_per_token(config),
+        warmup_steps=math.ceil(0.05 * steps),
+    )
+
+
+def build_optimizer(
+    model: torch.nn.Module, peak_lr: float, device: torch.device
+) -> torch.optim.AdamW:
+    # Decay matrices only (p.dim() >= 2): Linear weights, tied embedding, position
+    # embedding. parameters() yields the tied matrix once.
+    params = list(model.parameters())
+    decay = [p for p in params if p.dim() >= 2]
+    no_decay = [p for p in params if p.dim() < 2]
+    logger.info(
+        f"weight decay on {len(decay)} tensors ({sum(p.numel() for p in decay):,} "
+        + f"params), none on {len(no_decay)} ({sum(p.numel() for p in no_decay):,})"
+    )
+    return torch.optim.AdamW(
+        [
+            {"params": decay, "weight_decay": WEIGHT_DECAY},
+            {"params": no_decay, "weight_decay": 0.0},
+        ],
+        lr=peak_lr,  # overwritten every step from get_lr
+        betas=BETAS,
+        eps=EPS,
+        fused=device.type == "cuda",
+    )
+
+
+def set_up_run(args: argparse.Namespace) -> RunSetup:
+    rung = tuple(args.rung)
+    if rung not in EXPECTED_RUNGS:
+        raise ValueError(f"{rung} is not a band-1 rung: {EXPECTED_RUNGS}")
+    config = make_config(*rung)
+    rehearsal = args.max_steps is not None
+    if args.rehearsal_tokens_per_step is not None and not rehearsal:
+        raise ValueError("--rehearsal-tokens-per-step needs --max-steps")
+    if rehearsal:
+        tokens_per_step = args.rehearsal_tokens_per_step or TOKENS_PER_STEP
+        plan = rehearsal_plan(config, args.max_steps, tokens_per_step)
+    else:
+        tokens_per_step = TOKENS_PER_STEP
+        compute_budget = band_compute_budget(make_config(*EXPECTED_RUNGS[0]))
+        plan = plan_run(config, compute_budget, TOKENS_PER_STEP)
+    device = pick_device(args.device)
+    return RunSetup(
+        config=config,
+        plan=plan,
+        rehearsal=rehearsal,
+        tokens_per_step=tokens_per_step,
+        micro_batch_size=args.micro_batch,
+        accum_steps=accumulation_steps(tokens_per_step, args.micro_batch),
+        device=device,
+        autocast_dtype=torch.bfloat16 if device.type == "cuda" else None,
+        peak_lr=args.peak_lr,
+        min_lr=args.peak_lr * MIN_LR_RATIO,
+    )
+
+
+def main() -> None:
+    args = parse_args()
+    setup = set_up_run(args)
+    # Seed after the imports (importing src.model calls manual_seed), and build the
+    # model on the CPU so a seed gives the same initial weights on every device
+    _ = torch.manual_seed(args.seed)
+    model = TransformerLanguageModel(setup.config).to(setup.device)
+    optimizer = build_optimizer(model, setup.peak_lr, setup.device)
+    batches = TrainBatches(
+        CONTEXT_LENGTH, setup.micro_batch_size, args.data_seed, setup.device
+    )
+
+    windows_needed = setup.plan.steps * setup.accum_steps * setup.micro_batch_size
+    if windows_needed > batches.num_windows:
+        raise ValueError(
+            f"run needs {windows_needed:,} windows, train has {batches.num_windows:,}"
+        )
+
+    autocast = (
+        torch.autocast(setup.device.type, dtype=setup.autocast_dtype)
+        if setup.autocast_dtype is not None
+        else contextlib.nullcontext()
+    )
+    logger.info(f"{'REHEARSAL ' if setup.rehearsal else ''}run: {setup}")
+    # 2b: the step loop
+    _ = (optimizer, autocast)
+
+
+if __name__ == "__main__":
+    main()
