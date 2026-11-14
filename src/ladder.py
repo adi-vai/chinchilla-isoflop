@@ -48,6 +48,7 @@ def make_config(model_width: int, model_depth: int, num_heads: int) -> ModelConf
         model_width=model_width,
         model_depth=model_depth,
         num_heads=num_heads,
+        dropout_rate=0.0,  # the sweep runs without dropout (NOTES.md)
     )
 
 

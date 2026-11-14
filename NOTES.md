@@ -207,6 +207,8 @@ depressing every point on the curve. The modules and `dropout_rate` stay (0.0
 is a pass-through) so tinyshakespeare experiments can keep 0.2. Check on the
 single-epoch guarantee: train and val loss should track closely; val clearly
 above train means data is being repeated somewhere.
+Set in `make_config` (`src/ladder.py`), the one source of every sweep config, so
+no caller can build a sweep model with dropout on (decided 14 Nov).
 
 **Type checking: basedpyright, `recommended` mode, Any-reporting rules off**
 (config in `pyproject.toml`). `nn.Module.__call__` returns `Any`, so
@@ -415,6 +417,20 @@ The "Feasibility study" section below remains the reference for inputs.
   {(64,4,4,256), (128,4,4,512), (192,6,6,768), (320,8,8,1280), (480,10,8,1920)} →
   N ∈ {344K, 1.1M, 3.1M, 10.6M, 28.8M}. Note their disclosed config drift (W=100 vs
   500 on the 30M runs) — the honesty standard for this write-up.
+- **Optimizer (decided 14 Nov).** AdamW, betas (0.9, 0.95), eps 1e-8, weight decay
+  0.1 (Bryant & Liu and nanoGPT agree); gradient clip at global norm 1.0 (nanoGPT).
+  Decay applies to matrix weights only, by nanoGPT's rule `p.dim() >= 2`: every
+  Linear weight, the tied token embedding / `lm_head`, and the position embedding.
+  No decay on biases or LayerNorm. Fused AdamW on CUDA.
+- **Training data order (decided 14 Nov).** `train.bin` is cut into windows of T+1
+  tokens at stride T (each window's last token is the next one's first input, so
+  every token is a target once): 1,746,148 windows. One seeded permutation of them,
+  consumed in order without replacement; a run that would need more windows than
+  exist is an error (the largest run uses 1,571,584, ~90%). The **data-order seed
+  is the same for every rung** and separate from the model-initialisation seed, so
+  every run reads a prefix of one shared order and a second init seed changes only
+  the weights. Validation: the same cut, unshuffled, 20,919 windows covering all
+  but the last 62 tokens.
 
 ### Open — to settle before the pilot runs
 1. ~~N ladder~~ — **decided 25 Oct: Q=32, d/L=32, 7 rungs 2.2M–22.1M** (see Decided).
