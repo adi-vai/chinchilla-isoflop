@@ -34,8 +34,9 @@ def get_windows(
         batch = batch.pin_memory().to(device, non_blocking=True)
     else:
         batch = batch.to(device)
-    # Two views of one tensor, offset by one: (inputs, targets)
-    return batch[:, :-1], batch[:, 1:]
+    # Inputs are a view; targets are copied contiguous because the model flattens
+    # them with .view, which a strided slice of the (B, T+1) tensor can't support
+    return batch[:, :-1], batch[:, 1:].contiguous()
 
 
 class TrainBatches:
