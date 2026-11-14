@@ -5,20 +5,26 @@ Run from the repo root:
 
 --max-steps makes the run a rehearsal (pipeline check, not a sweep point): the
 schedule is built for that length, and --rehearsal-tokens-per-step may shrink the
-step. Rehearsals are marked as such in the logs and the results CSV.
+step and --rehearsal-val-windows cap the final eval. Rehearsal rows go to
+results/rehearsals.csv, never results/band1.csv, so band1.csv holds sweep points only.
 """
 
 import argparse
 import contextlib
+import csv
+import dataclasses
+import datetime
 import logging
 import math
+import subprocess
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 
-from src.data import DATA_SEED, TrainBatches
+from src.data import DATA_SEED, TrainBatches, val_batches
 from src.ladder import CONTEXT_LENGTH, make_config
 from src.model import ModelConfig, TransformerLanguageModel
 from src.run_plan import (
@@ -29,9 +35,13 @@ from src.run_plan import (
     plan_run,
 )
 from src.schedule import get_lr
-from src.util import flops_per_token
+from src.util import flops_per_token, matmul_params, total_params
 
 logger = logging.getLogger(__name__)
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+BAND_CSV = "band1.csv"  # sweep points only
+REHEARSAL_CSV = "rehearsals.csv"
 
 # Optimizer (NOTES.md, decided 14 Nov)
 BETAS = (0.9, 0.95)
@@ -53,6 +63,7 @@ class RunSetup:
     autocast_dtype: torch.dtype | None  # None = plain fp32
     peak_lr: float
     min_lr: float
+    val_windows: int | None  # None = the full val set
 
 
 @dataclass(frozen=True)
@@ -104,6 +115,15 @@ def parse_args() -> argparse.Namespace:
     _ = parser.add_argument(
         "--log-interval", type=int, default=50, help="steps between host syncs/logs"
     )
+    _ = parser.add_argument(
+        "--rehearsal-val-windows",
+        type=int,
+        help="rehearsal only: evaluate the first N val windows, not all",
+    )
+    _ = parser.add_argument(
+        "--peak-flops", type=float, help="device peak FLOP/s, for MFU (else blank)"
+    )
+    _ = parser.add_argument("--results-dir", type=Path, default=REPO_ROOT / "results")
     return parser.parse_args()
 
 
@@ -172,6 +192,8 @@ def set_up_run(args: argparse.Namespace) -> RunSetup:
     rehearsal = args.max_steps is not None
     if args.rehearsal_tokens_per_step is not None and not rehearsal:
         raise ValueError("--rehearsal-tokens-per-step needs --max-steps")
+    if args.rehearsal_val_windows is not None and not rehearsal:
+        raise ValueError("--rehearsal-val-windows needs --max-steps")
     if rehearsal:
         tokens_per_step = args.rehearsal_tokens_per_step or TOKENS_PER_STEP
         plan = rehearsal_plan(config, args.max_steps, tokens_per_step)
@@ -191,6 +213,7 @@ def set_up_run(args: argparse.Namespace) -> RunSetup:
         autocast_dtype=torch.bfloat16 if device.type == "cuda" else None,
         peak_lr=args.peak_lr,
         min_lr=args.peak_lr * MIN_LR_RATIO,
+        val_windows=args.rehearsal_val_windows,
     )
 
 
@@ -253,7 +276,65 @@ def train(
     )
 
 
+def evaluate(
+    model: torch.nn.Module,
+    setup: RunSetup,
+    autocast: contextlib.AbstractContextManager[None],
+) -> tuple[float, int]:
+    # Forward only, after the last step: outside the compute budget C, so nothing
+    # here is added to realised compute
+    model.eval()
+    loss_sum = torch.zeros((), device=setup.device)
+    windows = 0
+    with torch.no_grad():
+        for inputs, targets in val_batches(
+            CONTEXT_LENGTH, setup.micro_batch_size, setup.device, setup.val_windows
+        ):
+            with autocast:
+                _, loss = model(inputs, targets)
+            # loss is the mean over this batch's B·T tokens; weight by B so the
+            # smaller last batch counts per token, like every other
+            batch_windows = inputs.shape[0]
+            loss_sum += loss.float() * batch_windows
+            windows += batch_windows
+    model.train()
+    return (loss_sum / windows).item(), windows  # one host sync for the whole eval
+
+
+def git_commit() -> str:
+    # Short hash of HEAD, "-dirty" if tracked files have uncommitted changes
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", *args], cwd=REPO_ROOT, capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+    try:
+        sha = git("rev-parse", "--short", "HEAD")
+        dirty = git("status", "--porcelain", "--untracked-files=no")
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+    return f"{sha}-dirty" if dirty else sha
+
+
+def append_row(path: Path, row: dict[str, object]) -> None:
+    # Append one CSV row, writing the header if the file is new. An existing file
+    # with different columns is an error, never a silently misaligned row.
+    path.parent.mkdir(parents=True, exist_ok=True)
+    is_new = not path.exists()
+    if not is_new:
+        with path.open(newline="") as f:
+            header = next(csv.reader(f))
+        if header != list(row):
+            raise ValueError(f"{path} has columns {header}, expected {list(row)}")
+    with path.open("a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(row))
+        if is_new:
+            writer.writeheader()
+        writer.writerow(row)
+
+
 def main() -> None:
+    started = time.perf_counter()
     args = parse_args()
     setup = set_up_run(args)
     # Seed after the imports (importing src.model calls manual_seed), and build the
@@ -278,17 +359,67 @@ def main() -> None:
     )
     logger.info(f"{'REHEARSAL ' if setup.rehearsal else ''}run: {setup}")
 
-    def log_step(entry: StepLog) -> None:  # diff 3 adds the per-step CSV here
+    d, L, H = args.rung
+    timestamp = datetime.datetime.now(datetime.UTC).strftime("%Y%m%dT%H%M%SZ")
+    run_id = f"{timestamp}_d{d}_L{L}_H{H}_s{args.seed}"
+    if setup.rehearsal:
+        run_id += "_rehearsal"
+    step_csv = args.results_dir / "runs" / f"{run_id}.csv"
+
+    def log_step(entry: StepLog) -> None:
         logger.info(
             f"step {entry.step:>6,}/{setup.plan.steps:,}  lr {entry.lr:.2e}  "
             + f"loss {entry.train_loss:.4f}  grad norm {entry.grad_norm:.3f}  "
             + f"{entry.tokens_per_second:,.0f} tok/s"
         )
+        append_row(step_csv, dataclasses.asdict(entry))
 
     result = train(
         model, optimizer, batches, setup, autocast, args.log_interval, log_step
     )
-    logger.info(f"done: {result}")
+    val_loss, val_windows = evaluate(model, setup, autocast)
+
+    fpt = flops_per_token(setup.config)
+    tokens_per_second = setup.plan.realized_tokens / result.train_seconds
+    run_csv = args.results_dir / (REHEARSAL_CSV if setup.rehearsal else BAND_CSV)
+    append_row(
+        run_csv,
+        {
+            "run_id": run_id,
+            "d": d,
+            "L": L,
+            "H": H,
+            "total_params": total_params(setup.config),
+            "matmul_params": matmul_params(setup.config),
+            "flops_per_token": fpt,
+            "target_tokens": setup.plan.target_tokens,
+            "steps": setup.plan.steps,
+            "realized_tokens": setup.plan.realized_tokens,
+            "realized_compute": setup.plan.realized_compute,  # training only
+            "warmup_steps": setup.plan.warmup_steps,
+            "peak_lr": setup.peak_lr,
+            "min_lr": setup.min_lr,
+            "seed": args.seed,
+            "data_seed": args.data_seed,
+            "micro_batch": setup.micro_batch_size,
+            "accum_steps": setup.accum_steps,
+            "tokens_per_step": setup.tokens_per_step,
+            "device": setup.device.type,
+            "dtype": "bf16-autocast" if setup.autocast_dtype is not None else "fp32",
+            "final_val_loss": val_loss,
+            "val_windows": val_windows,
+            "wall_seconds": time.perf_counter() - started,
+            "tokens_per_second": tokens_per_second,
+            "mfu": tokens_per_second * fpt / args.peak_flops if args.peak_flops else "",
+            "clipped_fraction": result.clipped_fraction,
+            "git_commit": git_commit(),
+            "rehearsal": setup.rehearsal,
+        },
+    )
+    logger.info(
+        f"{run_id}: final val loss {val_loss:.4f} on {val_windows:,} windows, "
+        + f"{tokens_per_second:,.0f} tok/s; row in {run_csv}"
+    )
 
 
 if __name__ == "__main__":

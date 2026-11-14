@@ -69,11 +69,16 @@ class TrainBatches:
 
 
 def val_batches(
-    context_length: int, batch_size: int, device: torch.device
+    context_length: int,
+    batch_size: int,
+    device: torch.device,
+    max_windows: int | None = None,  # rehearsals only; None = the full set
 ) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
     """Every validation window once, in order; the last batch may be smaller."""
     tokens = load_tokens("val")
     total = num_windows(tokens, context_length)
+    if max_windows is not None:
+        total = min(total, max_windows)
     for first in range(0, total, batch_size):
         window_ids = np.arange(first, min(first + batch_size, total))
         yield get_windows(tokens, window_ids * context_length, context_length, device)
