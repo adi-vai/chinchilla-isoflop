@@ -12,6 +12,8 @@ import argparse
 import contextlib
 import logging
 import math
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
@@ -26,6 +28,7 @@ from src.run_plan import (
     band_compute_budget,
     plan_run,
 )
+from src.schedule import get_lr
 from src.util import flops_per_token
 
 logger = logging.getLogger(__name__)
@@ -50,6 +53,21 @@ class RunSetup:
     autocast_dtype: torch.dtype | None  # None = plain fp32
     peak_lr: float
     min_lr: float
+
+
+@dataclass(frozen=True)
+class StepLog:
+    step: int  # 0-indexed, the step just taken
+    lr: float
+    train_loss: float  # this step's mean over its micro-batches, un-scaled
+    grad_norm: float  # pre-clip global norm
+    tokens_per_second: float  # since the previous log
+
+
+@dataclass(frozen=True)
+class TrainResult:
+    clipped_fraction: float
+    train_seconds: float  # the step loop only; excludes setup and final eval
 
 
 def parse_args() -> argparse.Namespace:
@@ -82,6 +100,9 @@ def parse_args() -> argparse.Namespace:
         "--rehearsal-tokens-per-step",
         type=int,
         help=f"rehearsal only: tokens per step instead of {TOKENS_PER_STEP:,}",
+    )
+    _ = parser.add_argument(
+        "--log-interval", type=int, default=50, help="steps between host syncs/logs"
     )
     return parser.parse_args()
 
@@ -173,6 +194,65 @@ def set_up_run(args: argparse.Namespace) -> RunSetup:
     )
 
 
+def train(
+    model: torch.nn.Module,
+    optimizer: torch.optim.AdamW,
+    batches: TrainBatches,
+    setup: RunSetup,
+    autocast: contextlib.AbstractContextManager[None],
+    log_interval: int,
+    on_log: Callable[[StepLog], None],
+) -> TrainResult:
+    plan = setup.plan
+    device = setup.device
+    # Running totals stay on the device: reading them (.item()) forces the host to
+    # wait for the GPU, so that only happens at logging intervals
+    num_clipped = torch.zeros((), dtype=torch.int64, device=device)
+    model.train()
+    start = last_log_time = time.perf_counter()
+    last_log_step = -1
+    for step in range(plan.steps):
+        lr = get_lr(step, plan.steps, plan.warmup_steps, setup.peak_lr, setup.min_lr)
+        for group in optimizer.param_groups:
+            group["lr"] = lr
+
+        step_loss = torch.zeros((), device=device)
+        for _ in range(setup.accum_steps):
+            inputs, targets = batches.next_batch()
+            with autocast:
+                _, loss = model(inputs, targets)
+            step_loss += loss.detach()
+            # .grad sums over micro-batches; scaling makes it the mean (NOTES.md)
+            (loss / setup.accum_steps).backward()
+
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
+        num_clipped += grad_norm > GRAD_CLIP
+        _ = optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+
+        if (step + 1) % log_interval == 0 or step == plan.steps - 1:
+            train_loss = (step_loss / setup.accum_steps).item()  # host sync
+            if not math.isfinite(train_loss):
+                raise RuntimeError(f"non-finite train loss {train_loss} at step {step}")
+            now = time.perf_counter()
+            tokens = (step - last_log_step) * setup.tokens_per_step
+            on_log(
+                StepLog(
+                    step=step,
+                    lr=lr,
+                    train_loss=train_loss,
+                    grad_norm=grad_norm.item(),
+                    tokens_per_second=tokens / (now - last_log_time),
+                )
+            )
+            last_log_time, last_log_step = now, step
+
+    return TrainResult(
+        clipped_fraction=num_clipped.item() / plan.steps,
+        train_seconds=time.perf_counter() - start,
+    )
+
+
 def main() -> None:
     args = parse_args()
     setup = set_up_run(args)
@@ -197,8 +277,18 @@ def main() -> None:
         else contextlib.nullcontext()
     )
     logger.info(f"{'REHEARSAL ' if setup.rehearsal else ''}run: {setup}")
-    # 2b: the step loop
-    _ = (optimizer, autocast)
+
+    def log_step(entry: StepLog) -> None:  # diff 3 adds the per-step CSV here
+        logger.info(
+            f"step {entry.step:>6,}/{setup.plan.steps:,}  lr {entry.lr:.2e}  "
+            + f"loss {entry.train_loss:.4f}  grad norm {entry.grad_norm:.3f}  "
+            + f"{entry.tokens_per_second:,.0f} tok/s"
+        )
+
+    result = train(
+        model, optimizer, batches, setup, autocast, args.log_interval, log_step
+    )
+    logger.info(f"done: {result}")
 
 
 if __name__ == "__main__":
