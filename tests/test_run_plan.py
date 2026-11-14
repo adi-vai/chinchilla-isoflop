@@ -1,5 +1,5 @@
 """
-Tests for the per-run plan: token coverage, realised compute, data margin, warmup.
+Tests for the per-run plan: token coverage, realized compute, data margin, warmup.
 """
 
 import math
