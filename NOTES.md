@@ -367,6 +367,14 @@ The "Feasibility study" section below remains the reference for inputs.
   Rough H100 scale (Oct 2026: ~$2–3/h ≈ £2/h; small-model MFU 10–30%): £200 ≈ 100
   H100-h ≈ 7×10¹⁹ FLOPs at 20% MFU. TinyStories single-epoch bands cost far less —
   data, not money, binds.
+  - **Mac vs rented GPU (measured 14 Nov):** Mac (MPS, fp32): 53,953 tok/s on the
+    smallest rung at 16,384 tokens per step (`results/rehearsals.csv`, run
+    `20261114T203105Z_d160_L6_H5_s0_rehearsal`, commit `2ed8dba`; "-dirty" is
+    comment-only TODOs in `src/model.py`) = 0.86 TFLOP/s → its full 24,556-step run
+    ≈ 2.1 h; the band (7 × C = 4.5e16 FLOPs) ≈ 14.5 h at that FLOP/s (an upper
+    bound: larger rungs use the hardware better) — before the LR check and second
+    seeds multiply it → rented GPU. Rehearsal output is committed like sweep results
+    so this line has its evidence.
 - **Sequence:** CPU/MPS smoke → GPU smoke (launch, log, checkpoint; loss starts near
   ln 2000 ≈ 7.6 nats and falls) → **LR check** → **pilot band** → decide. Keep the
   pipeline test and the science test separate: a harness bug must not masquerade as
