@@ -2,6 +2,7 @@
 
 import csv
 import math
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -13,6 +14,9 @@ from src.run_plan import EXPECTED_RUNGS
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 STEPS = 20
+# Caps PyTorch's intra-op threads in the training subprocess. On a many-core
+# box, splitting these tiny matmuls across every core costs more than it saves.
+SMOKE_TEST_THREADS = "4"
 
 
 @pytest.mark.skipif(
@@ -52,6 +56,7 @@ def test_smallest_rung_rehearsal_trains_and_writes_its_row(tmp_path: Path) -> No
             str(tmp_path),
         ],
         cwd=REPO_ROOT,
+        env={**os.environ, "OMP_NUM_THREADS": SMOKE_TEST_THREADS},
         check=False,  # assert on returncode below, so a failure shows stderr
         capture_output=True,
         text=True,
