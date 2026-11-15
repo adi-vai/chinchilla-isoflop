@@ -20,7 +20,7 @@ import os
 import platform
 import subprocess
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -384,16 +384,26 @@ def git_commit() -> str:
     return f"{sha}-dirty" if dirty else sha
 
 
+def check_header(path: Path, columns: Sequence[str]) -> None:
+    # An existing results CSV must have exactly these columns; a new file is fine
+    if not path.exists():
+        return
+    with path.open(newline="") as f:
+        header = next(csv.reader(f), [])
+    if header != list(columns):
+        raise ValueError(
+            f"{path} has columns {header}, expected {list(columns)}: migrate it "
+            + "(see scripts/) or pass another --results-dir"
+        )
+
+
 def append_row(path: Path, row: dict[str, object]) -> None:
-    # Append one CSV row, writing the header if the file is new. An existing file
-    # with different columns is an error, never a silently misaligned row.
+    # Append one CSV row, writing the header if the file is new. A file with other
+    # columns is an error, never a silently misaligned row. main() checks at
+    # launch too; this re-check catches a file changed during the run.
     path.parent.mkdir(parents=True, exist_ok=True)
+    check_header(path, list(row))
     is_new = not path.exists()
-    if not is_new:
-        with path.open(newline="") as f:
-            header = next(csv.reader(f))
-        if header != list(row):
-            raise ValueError(f"{path} has columns {header}, expected {list(row)}")
     with path.open("a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(row))
         if is_new:
@@ -405,6 +415,10 @@ def main() -> None:
     started = time.perf_counter()
     args = parse_args()
     setup = set_up_run(args)
+    # Fail in the first second, not after training: the results file this run
+    # appends to must already have the right columns
+    run_csv = args.results_dir / (REHEARSAL_CSV if setup.rehearsal else BAND_CSV)
+    check_header(run_csv, RUN_COLUMNS)
     # Seed after the imports (importing src.model calls manual_seed), and build the
     # model on the CPU so a seed gives the same initial weights on every device
     _ = torch.manual_seed(args.seed)
@@ -449,7 +463,6 @@ def main() -> None:
 
     fpt = flops_per_token(setup.config)
     tokens_per_second = setup.plan.realized_tokens / result.train_seconds
-    run_csv = args.results_dir / (REHEARSAL_CSV if setup.rehearsal else BAND_CSV)
     row: dict[str, object] = {
         "run_id": run_id,
         "d": d,
@@ -484,6 +497,8 @@ def main() -> None:
         "rehearsal": setup.rehearsal,
     }
     assert tuple(row) == RUN_COLUMNS, "row keys drifted from RUN_COLUMNS"
+    # Log the full row first, so a failed write can't lose the result
+    logger.info(f"result row: {row}")
     append_row(run_csv, row)
     logger.info(
         f"{run_id}: final val loss {val_loss:.4f} on {val_windows:,} windows, "
