@@ -439,6 +439,19 @@ The "Feasibility study" section below remains the reference for inputs.
   every run reads a prefix of one shared order and a second init seed changes only
   the weights. Validation: the same cut, unshuffled, 20,919 windows covering all
   but the last 62 tokens.
+- **Fit row selection (decided 15 Nov, before the fit is written).** The band-1
+  fit reads the `results/band1.csv` rows with `peak_lr == 1.8e-3`, `seed == 0`,
+  `grad_clip == 1.0` and `rehearsal == False`, and asserts exactly one row per rung
+  in `EXPECTED_RUNGS`: 7 rows, none missing, no duplicates. A rerun of a rung then
+  fails the fit loudly instead of being averaged or quietly picked. 1.8e-3 is the
+  LR-check outcome (`dd6dff2`); the other LR-check rows stay in `band1.csv` but
+  don't enter the fit. This assertion is the fit's first test.
+- **Aborted run kept as evidence (15 Nov).**
+  `results/aborted/20261115T140155Z_d160_L6_H5_s0.csv` is a full d160 run at
+  5.4e-3 whose row was refused by the CSV header check after training; the check
+  now runs at startup (`8be4b3c`). Its rerun, `20261115T141136Z`, logged the same
+  step, LR, train loss and grad norm on all 492 logged steps, so only GPU time was
+  lost. Every log in `results/runs/` has a row in a results CSV.
 
 ### Open — to settle before the pilot runs
 1. ~~N ladder~~ — **decided 25 Oct: Q=32, d/L=32, 7 rungs 2.2M–22.1M** (see Decided).
