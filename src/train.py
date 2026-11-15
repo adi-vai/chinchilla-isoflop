@@ -16,6 +16,8 @@ import dataclasses
 import datetime
 import logging
 import math
+import os
+import platform
 import subprocess
 import time
 from collections.abc import Callable
@@ -42,12 +44,47 @@ logger = logging.getLogger(__name__)
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BAND_CSV = "band1.csv"  # sweep points only
 REHEARSAL_CSV = "rehearsals.csv"
+# Results CSV columns, in order. The backfill script imports this, so a migrated
+# file and a newly written one can't disagree.
+RUN_COLUMNS = (
+    "run_id",
+    "d",
+    "L",
+    "H",
+    "total_params",
+    "matmul_params",
+    "flops_per_token",
+    "target_tokens",
+    "steps",
+    "realized_tokens",
+    "realized_compute",
+    "warmup_steps",
+    "peak_lr",
+    "min_lr",
+    "grad_clip",
+    "seed",
+    "data_seed",
+    "micro_batch",
+    "accum_steps",
+    "tokens_per_step",
+    "device",
+    "gpu_name",
+    "dtype",
+    "final_val_loss",
+    "val_windows",
+    "wall_seconds",
+    "tokens_per_second",
+    "mfu",
+    "clipped_fraction",
+    "git_commit",
+    "rehearsal",
+)
 
 # Optimizer (NOTES.md, decided 14 Nov)
 BETAS = (0.9, 0.95)
 EPS = 1e-8
 WEIGHT_DECAY = 0.1
-GRAD_CLIP = 1.0
+DEFAULT_GRAD_CLIP = 1.0  # nanoGPT (NOTES.md); --grad-clip 0 turns clipping off
 MIN_LR_RATIO = 0.1  # min_lr = peak / 10
 
 
@@ -64,6 +101,7 @@ class RunSetup:
     peak_lr: float
     min_lr: float
     val_windows: int | None  # None = the full val set
+    grad_clip: float  # 0 = no clipping
 
 
 @dataclass(frozen=True)
@@ -124,6 +162,12 @@ def parse_args() -> argparse.Namespace:
         "--peak-flops", type=float, help="device peak FLOP/s, for MFU (else blank)"
     )
     _ = parser.add_argument("--results-dir", type=Path, default=REPO_ROOT / "results")
+    _ = parser.add_argument(
+        "--grad-clip",
+        type=float,
+        default=DEFAULT_GRAD_CLIP,
+        help="max global grad norm; 0 turns clipping off (the norm is still logged)",
+    )
     return parser.parse_args()
 
 
@@ -194,6 +238,8 @@ def set_up_run(args: argparse.Namespace) -> RunSetup:
         raise ValueError("--rehearsal-tokens-per-step needs --max-steps")
     if args.rehearsal_val_windows is not None and not rehearsal:
         raise ValueError("--rehearsal-val-windows needs --max-steps")
+    if args.grad_clip < 0:
+        raise ValueError(f"--grad-clip must be >= 0, got {args.grad_clip}")
     if rehearsal:
         tokens_per_step = args.rehearsal_tokens_per_step or TOKENS_PER_STEP
         plan = rehearsal_plan(config, args.max_steps, tokens_per_step)
@@ -214,6 +260,7 @@ def set_up_run(args: argparse.Namespace) -> RunSetup:
         peak_lr=args.peak_lr,
         min_lr=args.peak_lr * MIN_LR_RATIO,
         val_windows=args.rehearsal_val_windows,
+        grad_clip=args.grad_clip,
     )
 
 
@@ -227,6 +274,8 @@ def train(
     on_log: Callable[[StepLog], None],
 ) -> TrainResult:
     plan = setup.plan
+    # max_norm = inf still returns the pre-clip norm but never rescales
+    max_norm = setup.grad_clip if setup.grad_clip > 0 else math.inf
     device = setup.device
     # Running totals stay on the device: reading them (.item()) forces the host to
     # wait for the GPU, so that only happens at logging intervals
@@ -248,8 +297,8 @@ def train(
             # .grad sums over micro-batches; scaling makes it the mean (NOTES.md)
             (loss / setup.accum_steps).backward()
 
-        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
-        num_clipped += grad_norm > GRAD_CLIP
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+        num_clipped += grad_norm > max_norm
         _ = optimizer.step()
         optimizer.zero_grad(set_to_none=True)
 
@@ -299,6 +348,25 @@ def evaluate(
             windows += batch_windows
     model.train()
     return (loss_sum / windows).item(), windows  # one host sync for the whole eval
+
+
+def device_name(device: torch.device) -> str:
+    if device.type == "cuda":
+        return torch.cuda.get_device_name(device)  # e.g. "NVIDIA A100-SXM4-80GB"
+    # MPS and CPU both run on the host chip
+    if platform.system() == "Darwin":
+        return subprocess.run(
+            ["sysctl", "-n", "machdep.cpu.brand_string"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()  # e.g. "Apple M4"
+    if os.path.exists("/proc/cpuinfo"):  # Linux
+        with open("/proc/cpuinfo") as f:
+            for line in f:
+                if line.startswith("model name"):
+                    return line.split(":", 1)[1].strip()
+    return platform.processor() or "unknown"
 
 
 def git_commit() -> str:
@@ -382,40 +450,41 @@ def main() -> None:
     fpt = flops_per_token(setup.config)
     tokens_per_second = setup.plan.realized_tokens / result.train_seconds
     run_csv = args.results_dir / (REHEARSAL_CSV if setup.rehearsal else BAND_CSV)
-    append_row(
-        run_csv,
-        {
-            "run_id": run_id,
-            "d": d,
-            "L": L,
-            "H": H,
-            "total_params": total_params(setup.config),
-            "matmul_params": matmul_params(setup.config),
-            "flops_per_token": fpt,
-            "target_tokens": setup.plan.target_tokens,
-            "steps": setup.plan.steps,
-            "realized_tokens": setup.plan.realized_tokens,
-            "realized_compute": setup.plan.realized_compute,  # training only
-            "warmup_steps": setup.plan.warmup_steps,
-            "peak_lr": setup.peak_lr,
-            "min_lr": setup.min_lr,
-            "seed": args.seed,
-            "data_seed": args.data_seed,
-            "micro_batch": setup.micro_batch_size,
-            "accum_steps": setup.accum_steps,
-            "tokens_per_step": setup.tokens_per_step,
-            "device": setup.device.type,
-            "dtype": "bf16-autocast" if setup.autocast_dtype is not None else "fp32",
-            "final_val_loss": val_loss,
-            "val_windows": val_windows,
-            "wall_seconds": time.perf_counter() - started,
-            "tokens_per_second": tokens_per_second,
-            "mfu": tokens_per_second * fpt / args.peak_flops if args.peak_flops else "",
-            "clipped_fraction": result.clipped_fraction,
-            "git_commit": git_commit(),
-            "rehearsal": setup.rehearsal,
-        },
-    )
+    row: dict[str, object] = {
+        "run_id": run_id,
+        "d": d,
+        "L": L,
+        "H": H,
+        "total_params": total_params(setup.config),
+        "matmul_params": matmul_params(setup.config),
+        "flops_per_token": fpt,
+        "target_tokens": setup.plan.target_tokens,
+        "steps": setup.plan.steps,
+        "realized_tokens": setup.plan.realized_tokens,
+        "realized_compute": setup.plan.realized_compute,  # training only
+        "warmup_steps": setup.plan.warmup_steps,
+        "peak_lr": setup.peak_lr,
+        "min_lr": setup.min_lr,
+        "grad_clip": setup.grad_clip,
+        "seed": args.seed,
+        "data_seed": args.data_seed,
+        "micro_batch": setup.micro_batch_size,
+        "accum_steps": setup.accum_steps,
+        "tokens_per_step": setup.tokens_per_step,
+        "device": setup.device.type,
+        "gpu_name": device_name(setup.device),
+        "dtype": "bf16-autocast" if setup.autocast_dtype is not None else "fp32",
+        "final_val_loss": val_loss,
+        "val_windows": val_windows,
+        "wall_seconds": time.perf_counter() - started,
+        "tokens_per_second": tokens_per_second,
+        "mfu": tokens_per_second * fpt / args.peak_flops if args.peak_flops else "",
+        "clipped_fraction": result.clipped_fraction,
+        "git_commit": git_commit(),
+        "rehearsal": setup.rehearsal,
+    }
+    assert tuple(row) == RUN_COLUMNS, "row keys drifted from RUN_COLUMNS"
+    append_row(run_csv, row)
     logger.info(
         f"{run_id}: final val loss {val_loss:.4f} on {val_windows:,} windows, "
         + f"{tokens_per_second:,.0f} tok/s; row in {run_csv}"
