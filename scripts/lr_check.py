@@ -1,36 +1,31 @@
 """LR-check summary for band 1: is the default peak LR (6e-4) good enough?
 
-For each checked rung (seed-0 rows at all three grid LRs): the best final val
-loss, the relative gap from 6e-4's loss to the best, pass/fail against 0.5%,
-and an edge flag when the best LR is at the end of the grid (the optimum may lie
-outside it). Then seed noise, the relative gap between seeds 0 and 1 for the
-middle rung at 6e-4, and each run's clipped fraction.
+Only rungs run at more than one LR (seed 0) are part of the check; rungs with a
+single LR (sweep runs) are dropped. The LR columns are every peak LR in the
+checked rungs, so LRs added after the pre-registered grid show up as extra
+columns. For each checked rung that has all three pre-registered LRs: the best
+final val loss over every LR it was run at, the relative gap from 6e-4's loss to
+the best, pass/fail against 0.5%, and an edge flag when the best LR is the
+smallest or largest that rung was run at (the optimum may lie outside them).
+Then seed noise, the relative gap between seeds 0 and 1 for the middle rung at
+6e-4, and the clipped fraction of each checked run.
 
 The script reports; the judgement is yours. Run from the repo root:
     uv run python -m scripts.lr_check
 """
 
 import csv
-import math
 from collections import defaultdict
 
 from src.run_plan import EXPECTED_RUNGS
 from src.train import BAND_CSV, REPO_ROOT
 
-LR_GRID = (2e-4, 6e-4, 1.8e-3)  # 6e-4 ×/÷ 3
+PREREGISTERED_LRS = (2e-4, 6e-4, 1.8e-3)  # 6e-4 ×/÷ 3; a rung needs all three
 DEFAULT_LR = 6e-4
 PASS_GAP = 0.005  # 6e-4 passes if its loss is within 0.5% of the best LR's
 NOISE_RUNG = EXPECTED_RUNGS[len(EXPECTED_RUNGS) // 2]  # (256, 8, 8)
 
 Rung = tuple[int, int, int]
-
-
-def grid_lr(value: float) -> float:
-    # CSV round-trips floats as text; match each row's LR to its grid value
-    for lr in LR_GRID:
-        if math.isclose(value, lr, rel_tol=1e-9):
-            return lr
-    raise ValueError(f"peak_lr {value} is not on the LR grid {LR_GRID}")
 
 
 def relative_gap(loss: float, reference: float) -> float:
@@ -39,6 +34,10 @@ def relative_gap(loss: float, reference: float) -> float:
 
 def rung_label(rung: Rung) -> str:
     return "d{} L{} H{}".format(*rung)
+
+
+def row_rung(row: dict[str, str]) -> Rung:
+    return (int(row["d"]), int(row["L"]), int(row["H"]))
 
 
 def load_runs() -> list[dict[str, str]]:
@@ -52,8 +51,10 @@ def main() -> None:
     # a silent choice between two numbers
     losses: dict[tuple[Rung, float, int], float] = {}
     for row in runs:
-        rung = (int(row["d"]), int(row["L"]), int(row["H"]))
-        key = (rung, grid_lr(float(row["peak_lr"])), int(row["seed"]))
+        rung = row_rung(row)
+        # csv writes str(float), which float() reads back exactly, so equal LRs
+        # compare equal
+        key = (rung, float(row["peak_lr"]), int(row["seed"]))
         if key in losses:
             raise ValueError(f"two runs for rung {rung}, LR {key[1]}, seed {key[2]}")
         losses[key] = float(row["final_val_loss"])
@@ -62,10 +63,13 @@ def main() -> None:
     for (rung, lr, seed), loss in losses.items():
         if seed == 0:
             by_rung[rung][lr] = loss
+    # A rung at one LR is a sweep run, not part of the LR check
+    by_rung = {rung: lrs for rung, lrs in by_rung.items() if len(lrs) > 1}
+    lr_columns = sorted({lr for lr_losses in by_rung.values() for lr in lr_losses})
 
     print(
         f"{'rung':<12}"
-        + "".join(f"{lr:>9.1e}" for lr in LR_GRID)
+        + "".join(f"{lr:>9.1e}" for lr in lr_columns)
         + f"{'best LR':>9}{'gap':>8}  {'0.5%':<5} edge"
     )
     for rung in sorted(by_rung):
@@ -73,18 +77,19 @@ def main() -> None:
         label = rung_label(rung)
         cells = "".join(
             f"{lr_losses[lr]:>9.4f}" if lr in lr_losses else f"{'-':>9}"
-            for lr in LR_GRID
+            for lr in lr_columns
         )
-        if len(lr_losses) < len(LR_GRID):
+        missing = [lr for lr in PREREGISTERED_LRS if lr not in lr_losses]
+        if missing:
             print(
-                f"{label:<12}{cells}  incomplete: {len(lr_losses)} of "
-                + f"{len(LR_GRID)} LRs"
+                f"{label:<12}{cells}  incomplete: missing "
+                + ", ".join(f"{lr:.1e}" for lr in missing)
             )
             continue
         best_lr = min(lr_losses, key=lr_losses.__getitem__)
         gap = relative_gap(lr_losses[DEFAULT_LR], lr_losses[best_lr])
         verdict = "pass" if gap <= PASS_GAP else "FAIL"
-        edge = "EDGE" if best_lr in (LR_GRID[0], LR_GRID[-1]) else "-"
+        edge = "EDGE" if best_lr in (min(lr_losses), max(lr_losses)) else "-"
         print(f"{label:<12}{cells}{best_lr:>9.1e}{gap:>8.2%}  {verdict:<5} {edge}")
 
     seeds = {
@@ -107,8 +112,9 @@ def main() -> None:
         )
 
     print(f"\n{'run_id':<34}{'peak_lr':>9}{'seed':>6}{'clipped':>9}")
+    checked = [row for row in runs if row_rung(row) in by_rung]
     for row in sorted(
-        runs, key=lambda r: (int(r["d"]), float(r["peak_lr"]), int(r["seed"]))
+        checked, key=lambda r: (int(r["d"]), float(r["peak_lr"]), int(r["seed"]))
     ):
         print(
             f"{row['run_id']:<34}{float(row['peak_lr']):>9.1e}{row['seed']:>6}"
