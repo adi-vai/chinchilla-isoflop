@@ -448,8 +448,8 @@ The "Feasibility study" section below remains the reference for inputs.
    `C = 0.9 · 447,014,068 · flops_per_token = 6.41e15` (`coupling_check` in
    `src/ladder.py`). Still to settle: the margin, then per-run D and iterations,
    which need the batch size (item 4).
-4. ~~LR check plan~~ — **decided 15 Nov, before any LR comparison was possible (one
-   of 10 runs in)**:
+4. ~~LR check plan~~ — **decided 11–12 Nov (planning notes); written into NOTES.md on
+   15 Nov while the check was running, before any results were analysed**:
    - Runs: the smallest, middle and largest rungs — (160, 6, 5), (256, 8, 8),
      (384, 12, 12) — at peak LR 2e-4, 6e-4, 1.8e-3 (6e-4 ×/÷ 3), seed 0, full-length
      real runs (`plan_run` steps and warmup, band C), plus the middle rung at 6e-4
@@ -458,13 +458,20 @@ The "Feasibility study" section below remains the reference for inputs.
    - Criterion, per rung: 6e-4 passes if its final val loss is within **0.5%**
      (relative) of the best grid LR's. A best LR at either end of the grid is
      flagged as an edge (the optimum may lie outside it), separately from pass/fail.
-   - Read alongside: seed noise (seeds 0 vs 1, middle rung, 6e-4) — a gap near
-     0.5% means the criterion is at the resolution limit. Both seeds share data
-     seed 0, so the gap is initialisation noise only, which is the noise between
-     rungs of one band too (every rung reads the same data order). Also each run's
-     clipped fraction: a trend with N is a confounder.
+   - Read alongside: the seed gap at the middle rung (seeds 0 vs 1 at 6e-4), n = 1
+     pair: a rough estimate of initialisation noise, not a measurement — one sample
+     of a difference, on one rung (the smallest may be noisier). Both seeds share
+     data seed 0, so it excludes data-order noise, which a shared order also removes
+     between rungs; each rung still has its own initialisation noise. If any rung's
+     LR gap is close to 0.5% or to this noise level, run more seeds before deciding.
+     Also each run's clipped fraction: a trend with N is a confounder.
    - Summary: `uv run python -m scripts.lr_check`; the table informs the decision
      and doesn't make it.
+   - **Pre-launch check, before the band: clipping off.** Runs with `--grad-clip 0`
+     (added 15 Nov; the pre-clip norm is still logged) test whether clipping at 1.0
+     changes results — it binds on some steps of every run so far, and if its effect
+     varies with N it is a confounder. Design (rungs, comparison, threshold) to be
+     written here before it runs.
 5. **Seeds:** which 2–3 sizes get a second seed for the location test.
 6. **Cost / wall-clock estimate** for LR check + pilot band.
 7. ~~Exact token count~~ — **done 22 Oct: 447,014,068 train tokens** (1,792,648 clean
