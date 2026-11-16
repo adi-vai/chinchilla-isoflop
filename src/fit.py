@@ -152,18 +152,34 @@ def check_shape(fit: ParabolaFit, y: np.ndarray) -> bool:
     return all(m >= SHAPE_BAR for m in shape_margins(fit, y).values())
 
 
+@dataclass(frozen=True)
+class BandFit:
+    rows: list[dict[str, str]]  # the fit rows, in EXPECTED_RUNGS order
+    x: np.ndarray  # log10 N_total
+    y: np.ndarray  # final val loss
+    fit: ParabolaFit
+    jk: Jackknife
+
+
+def fit_band(path: Path = RESULTS_CSV) -> BandFit:
+    """Select the fit rows and run the full fit and the jackknife: one source for
+    main() and the plot."""
+    rows = select_fit_rows(load_rows(path))
+    x = np.log10([float(row["total_params"]) for row in rows])
+    y = np.array([float(row["final_val_loss"]) for row in rows])
+    x_bar = float(x.mean())
+    return BandFit(rows, x, y, fit_parabola(x, y, x_bar), jackknife(x, y, x_bar))
+
+
 def non_embedding_params(row: dict[str, str]) -> int:
     """Kaplan-convention N for the robustness fit. Decide the definition (see src/util.py)."""
     raise NotImplementedError
 
 
 def main() -> None:
-    rows = select_fit_rows(load_rows())
-    x = np.log10([float(row["total_params"]) for row in rows])
-    y = np.array([float(row["final_val_loss"]) for row in rows])
-    x_bar = float(x.mean())
-    fit = fit_parabola(x, y, x_bar)
-    jk = jackknife(x, y, x_bar)
+    band = fit_band()
+    rows, x, y, fit, jk = band.rows, band.x, band.y, band.fit, band.jk
+    x_bar = fit.x_bar
 
     logger.info(f"{'rung':<14}{'N':>12}{'log10 N':>9}{'val loss':>10}")
     for row, xi, yi in zip(rows, x, y, strict=True):
