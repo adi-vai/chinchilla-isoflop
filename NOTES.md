@@ -452,6 +452,37 @@ The "Feasibility study" section below remains the reference for inputs.
   now runs at startup (`8be4b3c`). Its rerun, `20261115T141136Z`, logged the same
   step, LR, train loss and grad norm on all 492 logged steps, so only GPU time was
   lost. Every log in `results/runs/` has a row in a results CSV.
+- **Fit specification (decided 16 Nov, before the fit is written).** The exact
+  definitions behind the pass/fail criterion above. The criterion was set before any
+  run (5% shape threshold fixed 4 Nov); these definitions were fixed 16 Nov, after the
+  band-1 losses were seen (edges ≈ 5.5% above d256) but before any fit.
+  - *Variables:* x = log₁₀ N_total, centred on the full-sample mean x̄; y = final val
+    loss. Fit in u = x − x̄ with `np.polyfit(u, y, 2)`, which returns `[a, b, c]`,
+    highest power first. Vertex x* = −b/(2a) + x̄ (add x̄ back); fitted minimum
+    y* = c − b²/(4a).
+  - *Guards:* a ≤ 0 in the full fit, or in any leave-one-out fit, is a failed result
+    and is investigated.
+  - *Uncertainty: leave-one-out jackknife* (used for band 1 in place of the
+    second-seed / bootstrap option above). Drop each point in turn and refit on the
+    other 6, centred on the same full-sample x̄; vertices x*₍ᵢ₎, mean x̄*.
+    SE = √[(n−1)/n · Σᵢ (x*₍ᵢ₎ − x̄*)²], n = 7.
+  - *Checks, all must pass:*
+    1. Location: vertex strictly between log₁₀ N of d160 and of d384.
+    2. Uncertainty: jackknife SE < log₁₀ 1.5 ≈ 0.176 **and** the range of the
+       leave-one-out vertices (max − min) < 0.176. The range catches one point
+       driving a wild vertex, which the SE smooths over.
+    3. Shape: the observed losses at d160 and at d384 are each ≥ 5% above the lowest
+       observed loss **and** ≥ 5% above y*.
+  - *Robustness:* the same fit with non-embedding N; reported, not pass/fail.
+  - *If a check fails:* report the result honestly: which check failed, what the
+    results suggest, and what would settle it. Check 3 ⇒ add rungs above d384; the
+    low end can't be extended at this C, because d160 sets C and sits at the data
+    bound (0.9 × train tokens). Check 2 ⇒ rungs inside the range or a second seed.
+    Seed noise (0.84%, one pair) is larger than check 3's current margin (~0.5%), so
+    check 3 is close to its boundary.
+  - *Tests first:* an exact parabola with a known vertex and x̄ far from zero,
+    recovered to rel=1e-12 by the full fit and by one leave-one-out fit (catches a
+    sign error in adding x̄ back); then the row-selection assertion.
 
 ### Open — to settle before the pilot runs
 1. ~~N ladder~~ — **decided 25 Oct: Q=32, d/L=32, 7 rungs 2.2M–22.1M** (see Decided).
