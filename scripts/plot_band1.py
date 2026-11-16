@@ -26,16 +26,25 @@ TEXT_SECONDARY = "#52514e"
 GRID = "#e4e3df"
 SURFACE = "#fcfcfb"
 
-N_TICKS_M = (2, 3, 4, 5, 7, 10, 15, 20)  # x ticks, in millions of params
+N_TICKS_M = (2, 3, 4, 5, 6, 7, 10, 15, 20)  # x ticks, in millions of params
 # Rung label offsets in points, clear of the curve and the vertex marker; default
 # is centred above the point
 LABEL_OFFSETS = {192: (0, -10), 256: (0, -10), 288: (0, -10), 384: (-12, 6)}
 
 
-def compute_label(realized_compute: list[float]) -> str:
-    # Every rung's realized C is within 0.01% of the band budget; show 3 sig figs
-    mantissa, exponent = f"{np.mean(realized_compute):.2e}".split("e")
+def sci(value: float, digits: int) -> str:
+    # 6.41e15 rather than 6.41e+15
+    mantissa, exponent = f"{value:.{digits}e}".split("e")
     return f"{mantissa}e{int(exponent)}"
+
+
+def schedule_label(rows: list[dict[str, str]]) -> str:
+    # The LR schedule the fit rows actually ran with; every row must agree
+    schedules = {(float(r["peak_lr"]), float(r["min_lr"])) for r in rows}
+    if len(schedules) != 1:
+        raise ValueError(f"fit rows ran with different LR schedules: {schedules}")
+    ((peak_lr, min_lr),) = schedules
+    return f"{sci(peak_lr, 1)} peak LR, cosine to {min_lr / peak_lr:.0%}"
 
 
 def main() -> None:
@@ -144,7 +153,8 @@ def main() -> None:
         0.05,
         f"N* ≈ {n_star / 1e6:.1f}M (×/÷ {se_factor:.2f}, jackknife SE)\n"
         + f"y* = {fit.y_min:.3f}\n"
-        + "1 seed per rung",
+        + "1 seed per rung\n"
+        + schedule_label(band.rows),
         transform=ax.transAxes,
         ha="left",
         va="bottom",
@@ -169,7 +179,7 @@ def main() -> None:
     ax.set_ylabel("final validation loss")
     realized = [float(row["realized_compute"]) for row in band.rows]
     ax.set_title(
-        f"IsoFLOP band 1: TinyStories, C ≈ {compute_label(realized)} FLOPs",
+        f"IsoFLOP band 1: TinyStories, C ≈ {sci(float(np.mean(realized)), 2)} FLOPs",
         loc="left",
         color=TEXT,
     )
